@@ -74,6 +74,14 @@ def minutes_until(reset_at) -> int:
     return max(0, int(seconds // 60))
 
 
+def format_reset_time(reset_at) -> str:
+    try:
+        dt = datetime.fromtimestamp(float(reset_at)).astimezone()
+        return dt.strftime("%H:%M")
+    except Exception:
+        return "--:--"
+
+
 def infer_cost_today(payload: dict) -> float:
     for key in ("cost_today", "today_cost", "daily_cost", "spend_today"):
         value = payload.get(key)
@@ -104,6 +112,7 @@ def build_payload_from_usage(payload: dict) -> dict:
         "cost_today": infer_cost_today(payload),
         "tokens_today": infer_tokens_today(payload, primary),
         "reset_min": minutes_until(primary.get("reset_at")),
+        "reset_text": format_reset_time(primary.get("reset_at")),
     }
 
 

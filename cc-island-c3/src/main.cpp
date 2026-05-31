@@ -22,14 +22,8 @@ struct CodexData {
   float costToday = -1.0f;
   uint32_t tokensToday = 0;
   uint16_t resetMin = 133;
+  String resetText = "--:--";
 } codex;
-
-String formatMoney(float value) {
-  if (value < 0.0f) {
-    return "--";
-  }
-  return "$" + String(value, 2);
-}
 
 void drawCenteredText(const String& text, int cx, int y, uint8_t size, uint16_t color, uint16_t bg) {
   tft.setTextColor(color, bg);
@@ -68,7 +62,6 @@ void drawCard(int x, int y, int w, int h) {
 
   tft.drawRoundRect(x + 16, y + 116, w - 32, 24, 9, muted);
   tft.fillRoundRect(x + 19, y + 119, (w - 38) * codex.windowPct / 100, 18, 7, accent);
-  drawCenteredText(String(codex.windowPct) + "%", x + w / 2, y + 121, 2, ST77XX_BLACK, accent);
 
   tft.setTextColor(frame, ST77XX_BLACK);
   tft.setTextSize(2);
@@ -85,7 +78,7 @@ void drawCard(int x, int y, int w, int h) {
   tft.print("Reset");
   tft.setTextColor(frame, ST77XX_BLACK);
   tft.setCursor(x + 92, y + 208);
-  tft.print(String(codex.resetMin) + " min");
+  tft.print(codex.resetText);
 }
 
 void renderScreen() {
@@ -105,6 +98,7 @@ bool updateFromJson(const String& line) {
   codex.costToday = doc["cost_today"] | codex.costToday;
   codex.tokensToday = doc["tokens_today"] | codex.tokensToday;
   codex.resetMin = doc["reset_min"] | codex.resetMin;
+  codex.resetText = String(static_cast<const char*>(doc["reset_text"] | codex.resetText.c_str()));
   renderScreen();
   return true;
 }
