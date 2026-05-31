@@ -3,6 +3,9 @@
 #include <ArduinoJson.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include "wifi_config.h"
 
 namespace {
 constexpr int kTftSclk = 4;
@@ -19,11 +22,14 @@ String serialBuffer;
 struct CodexData {
   uint8_t windowPct = 41;
   uint8_t weekPct = 17;
-  float costToday = -1.0f;
-  uint32_t tokensToday = 0;
   uint16_t resetMin = 133;
   String resetText = "--:--";
+  String syncText = "waiting";
 } codex;
+
+unsigned long lastFetchAt = 0;
+unsigned long lastWifiAttemptAt = 0;
+int wifiIndex = 0;
 
 void drawCenteredText(const String& text, int cx, int y, uint8_t size, uint16_t color, uint16_t bg) {
   tft.setTextColor(color, bg);
@@ -42,11 +48,6 @@ void drawCard(int x, int y, int w, int h) {
   const uint16_t accent = ST77XX_CYAN;
   const uint16_t muted = ST77XX_BLUE;
   const uint16_t weekAccent = ST77XX_MAGENTA;
-
-  tft.drawRoundRect(x, y, w, h, 14, muted);
-  tft.drawFastHLine(x + 16, y + 64, w - 32, muted);
-  tft.drawFastHLine(x + 16, y + 148, w - 32, muted);
-  tft.drawFastHLine(x + 16, y + 190, w - 32, muted);
 
   tft.setTextColor(accent, ST77XX_BLACK);
   tft.setTextSize(2);
@@ -81,6 +82,11 @@ void drawCard(int x, int y, int w, int h) {
   tft.setTextColor(frame, ST77XX_BLACK);
   tft.setCursor(x + 92, y + 198);
   tft.print(codex.resetText);
+
+  tft.setTextColor(muted, ST77XX_BLACK);
+  tft.setTextSize(1);
+  tft.setCursor(x + 16, y + 224);
+  tft.print(codex.syncText);
 }
 
 void renderScreen() {
@@ -88,7 +94,7 @@ void renderScreen() {
   drawCard(16, 10, 208, 220);
 }
 
-bool updateFromJson(const String& line) {
+bool applyJsonPayload(const String& line) {
   StaticJsonDocument<256> doc;
   DeserializationError err = deserializeJson(doc, line);
   if (err) {
@@ -97,8 +103,6 @@ bool updateFromJson(const String& line) {
 
   codex.windowPct = doc["window_pct"] | codex.windowPct;
   codex.weekPct = doc["week_pct"] | codex.weekPct;
-  codex.costToday = doc["cost_today"] | codex.costToday;
-  codex.tokensToday = doc["tokens_today"] | codex.tokensToday;
   codex.resetMin = doc["reset_min"] | codex.resetMin;
   codex.resetText = String(static_cast<const char*>(doc["reset_text"] | codex.resetText.c_str()));
   renderScreen();
@@ -109,7 +113,9 @@ void handleSerialInput() {
   while (Serial.available()) {
     char ch = static_cast<char>(Serial.read());
     if (ch == '\n') {
-      if (updateFromJson(serialBuffer)) {
+      if (applyJsonPayload(serialBuffer)) {
+        codex.syncText = "serial sync ok";
+        renderScreen();
         Serial.println("OK");
       } else {
         Serial.println("ERR");
@@ -119,6 +125,53 @@ void handleSerialInput() {
       serialBuffer += ch;
     }
   }
+}
+
+void ensureWifiConnected() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+  if (kWifiNetworkCount <= 0) {
+    codex.syncText = "wifi not set";
+    renderScreen();
+    return;
+  }
+  if (millis() - lastWifiAttemptAt < kWifiRetryMs) {
+    return;
+  }
+
+  lastWifiAttemptAt = millis();
+  codex.syncText = "wifi " + String(wifiIndex + 1) + " connecting";
+  renderScreen();
+  WiFi.disconnect(true, true);
+  WiFi.begin(kWifiNetworks[wifiIndex].ssid, kWifiNetworks[wifiIndex].password);
+  wifiIndex = (wifiIndex + 1) % kWifiNetworkCount;
+}
+
+void fetchFromBridge() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+  if (millis() - lastFetchAt < kFetchIntervalMs) {
+    return;
+  }
+
+  lastFetchAt = millis();
+  HTTPClient http;
+  http.begin(kBridgeUrl);
+  int httpCode = http.GET();
+  if (httpCode == HTTP_CODE_OK) {
+    String body = http.getString();
+    if (applyJsonPayload(body)) {
+      codex.syncText = "wifi sync ok";
+    } else {
+      codex.syncText = "json parse err";
+    }
+  } else {
+    codex.syncText = "http err " + String(httpCode);
+  }
+  http.end();
+  renderScreen();
 }
 }  // namespace
 
@@ -134,11 +187,20 @@ void setup() {
   tft.setRotation(0);
   tft.invertDisplay(true);
 
+  WiFi.mode(WIFI_STA);
   renderScreen();
   Serial.println("codex-card: ready");
 }
 
 void loop() {
   handleSerialInput();
-  delay(10);
+  ensureWifiConnected();
+  fetchFromBridge();
+
+  if (WiFi.status() == WL_CONNECTED && codex.syncText == "wifi connecting") {
+    codex.syncText = "wifi connected";
+    renderScreen();
+  }
+
+  delay(50);
 }
