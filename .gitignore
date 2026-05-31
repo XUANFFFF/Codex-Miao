@@ -1,0 +1,9 @@
+.pio/
+.vscode/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+Thumbs.db
+.DS_Store
+*.tmp
