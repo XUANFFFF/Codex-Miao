@@ -5,6 +5,13 @@
 #include <Adafruit_ST7789.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <string.h>
+
+#include "display_types.h"
+#include "face_renderer.h"
+#include "screen_mode_controller.h"
+#include "usage_card_renderer.h"
+#include "usage_state_tracker.h"
 #include "wifi_config.h"
 
 namespace {
@@ -14,157 +21,243 @@ constexpr int kTftCs = 7;
 constexpr int kTftDc = 2;
 constexpr int kTftRst = 3;
 constexpr int kBacklight = 10;
+constexpr int16_t kScreenWidth = 240;
+constexpr int16_t kScreenHeight = 240;
+constexpr size_t kSerialBufferLimit = 384;
+constexpr size_t kJsonDocCapacity = 384;
+constexpr uint8_t kTransitionStepsPerHalf = 4;
+constexpr uint8_t kTransitionPhaseCount = kTransitionStepsPerHalf * 2;
 
 SPIClass spi(FSPI);
 Adafruit_ST7789 tft(&spi, kTftCs, kTftDc, kTftRst);
+FaceRenderer faceRenderer(tft);
+ScreenModeController screenModeController;
+UsageCardRenderer usageCardRenderer(tft);
+UsageStateTracker usageStateTracker;
+UsageData usageData;
 String serialBuffer;
-
-struct CodexData {
-  uint8_t windowPct = 41;
-  uint8_t weekPct = 17;
-  uint16_t resetMin = 133;
-  String resetText = "--:--";
-  String syncText = "waiting";
-} codex;
+bool serialLineOverflowed = false;
+ScreenMode lastRenderedMode = ScreenMode::Face;
+bool transitionWasActive = false;
+TransitionDirection lastTransitionDirection = TransitionDirection::None;
+ScreenMode lastTransitionTargetMode = ScreenMode::Face;
+uint8_t lastTransitionPhase = 0xFF;
 
 unsigned long lastFetchAt = 0;
 unsigned long lastWifiAttemptAt = 0;
 int wifiIndex = 0;
 bool wifiWasConnected = false;
 
-void clearRect(int x, int y, int w, int h) {
-  tft.fillRect(x, y, w, h, ST77XX_BLACK);
-}
-
-void drawCenteredText(const String& text, int cx, int y, uint8_t size, uint16_t color, uint16_t bg) {
-  tft.setTextColor(color, bg);
-  tft.setTextSize(size);
-  int16_t x1;
-  int16_t y1;
-  uint16_t w;
-  uint16_t h;
-  tft.getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
-  tft.setCursor(cx - static_cast<int>(w) / 2, y);
-  tft.print(text);
-}
-
-void drawStaticCard(int x, int y, int w, int h) {
-  const uint16_t frame = ST77XX_WHITE;
-  const uint16_t accent = ST77XX_CYAN;
-  const uint16_t muted = ST77XX_BLUE;
-
-  tft.setTextColor(accent, ST77XX_BLACK);
-  tft.setTextSize(2);
-  tft.setCursor(x + 14, y + 12);
-  tft.print("Codex");
-
-  tft.setTextColor(muted, ST77XX_BLACK);
-  tft.setTextSize(1);
-  tft.setCursor(x + 16, y + 32);
-  tft.print("remaining");
-
-  tft.setTextColor(frame, ST77XX_BLACK);
-  tft.setTextSize(2);
-  tft.setCursor(x + 16, y + 62);
-  tft.print("5h");
-
-  tft.drawRoundRect(x + 16, y + 82, w - 32, 32, 10, muted);
-
-  tft.setTextColor(frame, ST77XX_BLACK);
-  tft.setTextSize(2);
-  tft.setCursor(x + 16, y + 134);
-  tft.print("7d");
-
-  tft.drawRoundRect(x + 16, y + 154, w - 32, 22, 9, muted);
-
-  tft.setTextColor(muted, ST77XX_BLACK);
-  tft.setTextSize(2);
-  tft.setCursor(x + 16, y + 192);
-  tft.print("Reset");
-}
-
-void drawDynamicCard(int x, int y, int w, int h) {
-  const uint16_t frame = ST77XX_WHITE;
-  const uint16_t accent = ST77XX_CYAN;
-  const uint16_t weekAccent = ST77XX_MAGENTA;
-
-  clearRect(x + w - 116, y + 8, 104, 44);
-  tft.setTextColor(frame, ST77XX_BLACK);
-  tft.setTextSize(5);
-  tft.setCursor(x + w - 110, y + 10);
-  tft.print(String(codex.windowPct) + "%");
-
-  clearRect(x + 19, y + 85, w - 38, 26);
-  tft.fillRoundRect(x + 19, y + 85, (w - 38) * codex.windowPct / 100, 26, 8, accent);
-
-  clearRect(x + 19, y + 157, w - 38, 16);
-  tft.fillRoundRect(x + 19, y + 157, (w - 38) * codex.weekPct / 100, 16, 7, weekAccent);
-  clearRect(x + w - 76, y + 131, 62, 18);
-  tft.setTextColor(frame, ST77XX_BLACK);
-  tft.setTextSize(2);
-  tft.setCursor(x + w - 72, y + 134);
-  tft.print(String(codex.weekPct) + "%");
-
-  clearRect(x + 92, y + 192, 54, 16);
-  tft.setTextColor(frame, ST77XX_BLACK);
-  tft.setTextSize(2);
-  tft.setCursor(x + 92, y + 192);
-  tft.print(codex.resetText);
-
-  clearRect(x + 152, y + 192, 52, 16);
-  tft.setTextColor(ST77XX_BLUE, ST77XX_BLACK);
-  tft.setTextSize(1);
-  tft.setCursor(x + 154, y + 196);
-  tft.print(codex.syncText);
-}
-
-void renderScreen(bool full) {
-  if (full) {
-    tft.fillScreen(ST77XX_BLACK);
-    drawStaticCard(16, 2, 208, 220);
+void copyBoundedText(char* dest, size_t capacity, const char* src) {
+  if (capacity == 0 || dest == nullptr) {
+    return;
   }
-  drawDynamicCard(16, 2, 208, 220);
+
+  if (src == nullptr) {
+    dest[0] = '\0';
+    return;
+  }
+
+  strncpy(dest, src, capacity);
+  dest[capacity - 1] = '\0';
+}
+
+bool boundedTextEquals(const char* left, const char* right, size_t capacity) {
+  if (left == right) {
+    return true;
+  }
+  if (left == nullptr || right == nullptr) {
+    return false;
+  }
+  return strncmp(left, right, capacity) == 0;
+}
+
+uint8_t clampPercent(long value) {
+  if (value < 0) {
+    return 0;
+  }
+  if (value > 100) {
+    return 100;
+  }
+  return static_cast<uint8_t>(value);
+}
+
+uint16_t clampResetMinutes(long value) {
+  if (value < 0) {
+    return 0;
+  }
+  if (value > 65535L) {
+    return 65535;
+  }
+  return static_cast<uint16_t>(value);
+}
+
+void renderMode(ScreenMode mode, bool fullRedraw) {
+  if (mode == ScreenMode::UsageCard) {
+    usageCardRenderer.renderFrame(usageData, fullRedraw);
+  } else {
+    faceRenderer.render(fullRedraw);
+  }
+}
+
+int16_t computeCoverWidth(uint8_t progress) {
+  if (progress >= kTransitionPhaseCount) {
+    return 0;
+  }
+
+  if (progress <= kTransitionStepsPerHalf) {
+    return static_cast<int16_t>((static_cast<uint32_t>(progress) * kScreenWidth) /
+                                kTransitionStepsPerHalf);
+  }
+
+  return static_cast<int16_t>((static_cast<uint32_t>(kTransitionPhaseCount - progress) *
+                               kScreenWidth) /
+                              kTransitionStepsPerHalf);
+}
+
+uint8_t computeTransitionPhase(uint8_t progress) {
+  const uint16_t scaled = static_cast<uint16_t>(progress) * kTransitionPhaseCount;
+  uint8_t phase = static_cast<uint8_t>(scaled / 255U);
+  if (phase > kTransitionPhaseCount) {
+    phase = kTransitionPhaseCount;
+  }
+  return phase;
+}
+
+void drawTransitionCover(TransitionDirection direction, uint8_t phase) {
+  const int16_t coverWidth = computeCoverWidth(phase);
+  if (coverWidth <= 0) {
+    return;
+  }
+
+  const bool coverFromLeft = direction == TransitionDirection::FaceToCard;
+  const int16_t coverX = coverFromLeft ? 0 : (kScreenWidth - coverWidth);
+  tft.fillRect(coverX, 0, coverWidth, kScreenHeight, ST77XX_BLACK);
+}
+
+void resetFaceToIdle() {
+  faceRenderer.clearExpressionHold();
+  faceRenderer.setAutoCycleEnabled(true);
+  faceRenderer.setExpression(FaceExpression::Neutral);
+}
+
+void updateDisplay() {
+  const uint32_t nowMs = millis();
+  const ScreenMode desiredMode =
+      usageStateTracker.isUsageActive(nowMs) ? ScreenMode::UsageCard : ScreenMode::Face;
+
+  screenModeController.setMode(desiredMode, nowMs);
+  screenModeController.update(nowMs);
+
+  const ScreenMode currentMode = screenModeController.currentMode();
+  if (currentMode == ScreenMode::Face && lastRenderedMode != ScreenMode::Face) {
+    resetFaceToIdle();
+  }
+
+  const TransitionState& transition = screenModeController.transition();
+  const bool fullRedraw = screenModeController.needsFullRedraw();
+  const ScreenMode targetMode = screenModeController.targetMode();
+  const bool transitionJustStarted =
+      transition.active &&
+      (!transitionWasActive || transition.direction != lastTransitionDirection ||
+       targetMode != lastTransitionTargetMode);
+
+  if (transitionJustStarted && targetMode == ScreenMode::Face) {
+    resetFaceToIdle();
+  }
+
+  faceRenderer.update(nowMs);
+
+  if (transition.active) {
+    const uint8_t transitionPhase = computeTransitionPhase(transition.progress);
+    if (transitionPhase != lastTransitionPhase || fullRedraw || transitionJustStarted) {
+      const bool revealTarget = transitionPhase > kTransitionStepsPerHalf;
+      if (revealTarget) {
+        const bool revealNeedsFullRedraw =
+            lastTransitionPhase <= kTransitionStepsPerHalf || targetMode == ScreenMode::UsageCard;
+        renderMode(targetMode, revealNeedsFullRedraw);
+      } else if (transitionJustStarted || fullRedraw) {
+        renderMode(currentMode, true);
+      }
+
+      drawTransitionCover(transition.direction, transitionPhase);
+      lastTransitionPhase = transitionPhase;
+    }
+    transitionWasActive = true;
+    lastTransitionDirection = transition.direction;
+    lastTransitionTargetMode = targetMode;
+  } else {
+    renderMode(currentMode, fullRedraw);
+    lastRenderedMode = currentMode;
+    transitionWasActive = false;
+    lastTransitionDirection = TransitionDirection::None;
+    lastTransitionTargetMode = currentMode;
+    lastTransitionPhase = 0xFF;
+  }
+
+  if (fullRedraw) {
+    screenModeController.consumeFullRedrawFlag();
+  }
 }
 
 bool applyJsonPayload(const String& line) {
-  StaticJsonDocument<256> doc;
+  StaticJsonDocument<kJsonDocCapacity> doc;
   DeserializationError err = deserializeJson(doc, line);
   if (err) {
     return false;
   }
 
-  uint8_t nextWindowPct = doc["window_pct"] | codex.windowPct;
-  uint8_t nextWeekPct = doc["week_pct"] | codex.weekPct;
-  uint16_t nextResetMin = doc["reset_min"] | codex.resetMin;
-  String nextResetText = String(static_cast<const char*>(doc["reset_text"] | codex.resetText.c_str()));
+  UsageData nextData = usageData;
 
-  bool changed = nextWindowPct != codex.windowPct || nextWeekPct != codex.weekPct ||
-                 nextResetMin != codex.resetMin || nextResetText != codex.resetText;
-
-  codex.windowPct = nextWindowPct;
-  codex.weekPct = nextWeekPct;
-  codex.resetMin = nextResetMin;
-  codex.resetText = nextResetText;
-
-  if (changed) {
-    renderScreen(false);
+  if (doc["window_pct"].is<long>()) {
+    nextData.windowPct = clampPercent(doc["window_pct"].as<long>());
   }
+
+  if (doc["week_pct"].is<long>()) {
+    nextData.weekPct = clampPercent(doc["week_pct"].as<long>());
+  }
+
+  if (doc["reset_min"].is<long>()) {
+    nextData.resetMin = clampResetMinutes(doc["reset_min"].as<long>());
+  }
+
+  if (doc["reset_text"].is<const char*>()) {
+    copyBoundedText(nextData.resetText, kResetTextCapacity, doc["reset_text"].as<const char*>());
+  }
+
+  const bool dataChanged =
+      nextData.windowPct != usageData.windowPct || nextData.weekPct != usageData.weekPct ||
+      nextData.resetMin != usageData.resetMin ||
+      !boundedTextEquals(nextData.resetText, usageData.resetText, kResetTextCapacity);
+
+  usageData = nextData;
+  const bool hasMeaningfulActivity = usageStateTracker.applyIncomingData(usageData, millis());
+  if (hasMeaningfulActivity) {
+    faceRenderer.setExpression(FaceExpression::Happy);
+    faceRenderer.setAutoCycleEnabled(true);
+  }
+
+  if (dataChanged || hasMeaningfulActivity) {
+    updateDisplay();
+  }
+
   return true;
 }
 
-void setSyncText(const String& text) {
-  if (codex.syncText == text) {
+void setSyncText(const char* text) {
+  if (boundedTextEquals(usageData.syncText, text, kSyncTextCapacity)) {
     return;
   }
-  codex.syncText = text;
-  renderScreen(false);
+
+  copyBoundedText(usageData.syncText, kSyncTextCapacity, text);
+  updateDisplay();
 }
 
 void handleSerialInput() {
   while (Serial.available()) {
     char ch = static_cast<char>(Serial.read());
     if (ch == '\n') {
-      if (applyJsonPayload(serialBuffer)) {
+      if (!serialLineOverflowed && applyJsonPayload(serialBuffer)) {
         setSyncText("serial");
         Serial.println("OK");
       } else {
@@ -172,7 +265,18 @@ void handleSerialInput() {
         Serial.println("ERR");
       }
       serialBuffer = "";
+      serialLineOverflowed = false;
     } else if (ch != '\r') {
+      if (serialLineOverflowed) {
+        continue;
+      }
+
+      if (serialBuffer.length() >= kSerialBufferLimit) {
+        serialBuffer = "";
+        serialLineOverflowed = true;
+        continue;
+      }
+
       serialBuffer += ch;
     }
   }
@@ -235,8 +339,9 @@ void setup() {
   tft.setRotation(0);
   tft.invertDisplay(true);
 
+  faceRenderer.begin();
   WiFi.mode(WIFI_STA);
-  renderScreen(true);
+  updateDisplay();
   Serial.println("codex-card: ready");
 }
 
@@ -252,5 +357,6 @@ void loop() {
   wifiWasConnected = wifiConnected;
 
   fetchFromBridge();
+  updateDisplay();
   delay(50);
 }
