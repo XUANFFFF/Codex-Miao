@@ -30,6 +30,11 @@ struct CodexData {
 unsigned long lastFetchAt = 0;
 unsigned long lastWifiAttemptAt = 0;
 int wifiIndex = 0;
+bool wifiWasConnected = false;
+
+void clearRect(int x, int y, int w, int h) {
+  tft.fillRect(x, y, w, h, ST77XX_BLACK);
+}
 
 void drawCenteredText(const String& text, int cx, int y, uint8_t size, uint16_t color, uint16_t bg) {
   tft.setTextColor(color, bg);
@@ -43,55 +48,82 @@ void drawCenteredText(const String& text, int cx, int y, uint8_t size, uint16_t 
   tft.print(text);
 }
 
-void drawCard(int x, int y, int w, int h) {
+void drawStaticCard(int x, int y, int w, int h) {
   const uint16_t frame = ST77XX_WHITE;
   const uint16_t accent = ST77XX_CYAN;
   const uint16_t muted = ST77XX_BLUE;
-  const uint16_t weekAccent = ST77XX_MAGENTA;
 
   tft.setTextColor(accent, ST77XX_BLACK);
   tft.setTextSize(2);
-  tft.setCursor(x + 16, y + 16);
+  tft.setCursor(x + 14, y + 12);
   tft.print("Codex");
-
-  tft.setTextColor(frame, ST77XX_BLACK);
-  tft.setTextSize(2);
-  tft.setCursor(x + 16, y + 46);
-  tft.print("5h");
-
-  tft.setTextSize(4);
-  tft.setCursor(x + w - 86, y + 42);
-  tft.print(String(codex.windowPct) + "%");
-
-  tft.drawRoundRect(x + 16, y + 84, w - 32, 34, 11, muted);
-  tft.fillRoundRect(x + 19, y + 87, (w - 38) * codex.windowPct / 100, 28, 8, accent);
-
-  tft.setTextColor(frame, ST77XX_BLACK);
-  tft.setTextSize(2);
-  tft.setCursor(x + 16, y + 132);
-  tft.print("7d");
-
-  tft.drawRoundRect(x + 16, y + 158, w - 32, 24, 9, muted);
-  tft.fillRoundRect(x + 19, y + 161, (w - 38) * codex.weekPct / 100, 18, 7, weekAccent);
-  drawCenteredText(String(codex.weekPct) + "%", x + w / 2, y + 163, 2, ST77XX_WHITE, ST77XX_BLACK);
-
-  tft.setTextColor(muted, ST77XX_BLACK);
-  tft.setTextSize(2);
-  tft.setCursor(x + 16, y + 198);
-  tft.print("Reset");
-  tft.setTextColor(frame, ST77XX_BLACK);
-  tft.setCursor(x + 92, y + 198);
-  tft.print(codex.resetText);
 
   tft.setTextColor(muted, ST77XX_BLACK);
   tft.setTextSize(1);
-  tft.setCursor(x + 16, y + 224);
+  tft.setCursor(x + 16, y + 32);
+  tft.print("remaining");
+
+  tft.setTextColor(frame, ST77XX_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(x + 16, y + 62);
+  tft.print("5h");
+
+  tft.drawRoundRect(x + 16, y + 82, w - 32, 32, 10, muted);
+
+  tft.setTextColor(frame, ST77XX_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(x + 16, y + 134);
+  tft.print("7d");
+
+  tft.drawRoundRect(x + 16, y + 154, w - 32, 22, 9, muted);
+
+  tft.setTextColor(muted, ST77XX_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(x + 16, y + 192);
+  tft.print("Reset");
+}
+
+void drawDynamicCard(int x, int y, int w, int h) {
+  const uint16_t frame = ST77XX_WHITE;
+  const uint16_t accent = ST77XX_CYAN;
+  const uint16_t weekAccent = ST77XX_MAGENTA;
+
+  clearRect(x + w - 116, y + 8, 104, 44);
+  tft.setTextColor(frame, ST77XX_BLACK);
+  tft.setTextSize(5);
+  tft.setCursor(x + w - 110, y + 10);
+  tft.print(String(codex.windowPct) + "%");
+
+  clearRect(x + 19, y + 85, w - 38, 26);
+  tft.fillRoundRect(x + 19, y + 85, (w - 38) * codex.windowPct / 100, 26, 8, accent);
+
+  clearRect(x + 19, y + 157, w - 38, 16);
+  tft.fillRoundRect(x + 19, y + 157, (w - 38) * codex.weekPct / 100, 16, 7, weekAccent);
+  clearRect(x + w - 76, y + 131, 62, 18);
+  tft.setTextColor(frame, ST77XX_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(x + w - 72, y + 134);
+  tft.print(String(codex.weekPct) + "%");
+
+  clearRect(x + 92, y + 192, 54, 16);
+  tft.setTextColor(frame, ST77XX_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(x + 92, y + 192);
+  tft.print(codex.resetText);
+
+  clearRect(x + 152, y + 192, 52, 16);
+  tft.setTextColor(ST77XX_BLUE, ST77XX_BLACK);
+  tft.setTextSize(1);
+  tft.setCursor(x + 154, y + 196);
   tft.print(codex.syncText);
 }
 
-void renderScreen() {
-  tft.fillScreen(ST77XX_BLACK);
-  drawCard(16, 10, 208, 220);
+void renderScreen(bool full) {
+  if (full) {
+    tft.fillScreen(ST77XX_BLACK);
+    drawStaticCard(16, 2, 208, 220);
+  }
+  drawDynamicCard(16, 2, 208, 220);
 }
 
 bool applyJsonPayload(const String& line) {
@@ -101,12 +133,31 @@ bool applyJsonPayload(const String& line) {
     return false;
   }
 
-  codex.windowPct = doc["window_pct"] | codex.windowPct;
-  codex.weekPct = doc["week_pct"] | codex.weekPct;
-  codex.resetMin = doc["reset_min"] | codex.resetMin;
-  codex.resetText = String(static_cast<const char*>(doc["reset_text"] | codex.resetText.c_str()));
-  renderScreen();
+  uint8_t nextWindowPct = doc["window_pct"] | codex.windowPct;
+  uint8_t nextWeekPct = doc["week_pct"] | codex.weekPct;
+  uint16_t nextResetMin = doc["reset_min"] | codex.resetMin;
+  String nextResetText = String(static_cast<const char*>(doc["reset_text"] | codex.resetText.c_str()));
+
+  bool changed = nextWindowPct != codex.windowPct || nextWeekPct != codex.weekPct ||
+                 nextResetMin != codex.resetMin || nextResetText != codex.resetText;
+
+  codex.windowPct = nextWindowPct;
+  codex.weekPct = nextWeekPct;
+  codex.resetMin = nextResetMin;
+  codex.resetText = nextResetText;
+
+  if (changed) {
+    renderScreen(false);
+  }
   return true;
+}
+
+void setSyncText(const String& text) {
+  if (codex.syncText == text) {
+    return;
+  }
+  codex.syncText = text;
+  renderScreen(false);
 }
 
 void handleSerialInput() {
@@ -114,10 +165,10 @@ void handleSerialInput() {
     char ch = static_cast<char>(Serial.read());
     if (ch == '\n') {
       if (applyJsonPayload(serialBuffer)) {
-        codex.syncText = "serial sync ok";
-        renderScreen();
+        setSyncText("serial");
         Serial.println("OK");
       } else {
+        setSyncText("ser err");
         Serial.println("ERR");
       }
       serialBuffer = "";
@@ -132,8 +183,7 @@ void ensureWifiConnected() {
     return;
   }
   if (kWifiNetworkCount <= 0) {
-    codex.syncText = "wifi not set";
-    renderScreen();
+    setSyncText("n/a");
     return;
   }
   if (millis() - lastWifiAttemptAt < kWifiRetryMs) {
@@ -141,8 +191,7 @@ void ensureWifiConnected() {
   }
 
   lastWifiAttemptAt = millis();
-  codex.syncText = "wifi " + String(wifiIndex + 1) + " connecting";
-  renderScreen();
+  setSyncText("wifi...");
   WiFi.disconnect(true, true);
   WiFi.begin(kWifiNetworks[wifiIndex].ssid, kWifiNetworks[wifiIndex].password);
   wifiIndex = (wifiIndex + 1) % kWifiNetworkCount;
@@ -152,7 +201,7 @@ void fetchFromBridge() {
   if (WiFi.status() != WL_CONNECTED) {
     return;
   }
-  if (millis() - lastFetchAt < kFetchIntervalMs) {
+  if (lastFetchAt != 0 && millis() - lastFetchAt < kFetchIntervalMs) {
     return;
   }
 
@@ -163,15 +212,14 @@ void fetchFromBridge() {
   if (httpCode == HTTP_CODE_OK) {
     String body = http.getString();
     if (applyJsonPayload(body)) {
-      codex.syncText = "wifi sync ok";
+      setSyncText("ok");
     } else {
-      codex.syncText = "json parse err";
+      setSyncText("json");
     }
   } else {
-    codex.syncText = "http err " + String(httpCode);
+    setSyncText("http");
   }
   http.end();
-  renderScreen();
 }
 }  // namespace
 
@@ -188,19 +236,21 @@ void setup() {
   tft.invertDisplay(true);
 
   WiFi.mode(WIFI_STA);
-  renderScreen();
+  renderScreen(true);
   Serial.println("codex-card: ready");
 }
 
 void loop() {
   handleSerialInput();
   ensureWifiConnected();
-  fetchFromBridge();
 
-  if (WiFi.status() == WL_CONNECTED && codex.syncText == "wifi connecting") {
-    codex.syncText = "wifi connected";
-    renderScreen();
+  bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  if (wifiConnected && !wifiWasConnected) {
+    lastFetchAt = 0;
+    setSyncText("wifi");
   }
+  wifiWasConnected = wifiConnected;
 
+  fetchFromBridge();
   delay(50);
 }

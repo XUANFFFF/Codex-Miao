@@ -6,7 +6,7 @@ struct WifiNetwork {
 };
 
 static constexpr WifiNetwork kWifiNetworks[] = {
-    {"Xiaomi_ZLF_5G", "2268888888888"},
+    {"Xiaomi_ZLF", "2268888888888"},
     {"REPLACE_WITH_WIFI_NAME_2", "REPLACE_WITH_WIFI_PASSWORD_2"},
 };
 
