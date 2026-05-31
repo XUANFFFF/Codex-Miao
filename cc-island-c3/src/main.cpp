@@ -43,8 +43,10 @@ void drawCard(int x, int y, int w, int h) {
   const uint16_t muted = ST77XX_BLUE;
   const uint16_t weekAccent = ST77XX_MAGENTA;
 
-  tft.drawRoundRect(x, y, w, h, 14, frame);
-  tft.drawRoundRect(x + 1, y + 1, w - 2, h - 2, 14, muted);
+  tft.drawRoundRect(x, y, w, h, 14, muted);
+  tft.drawFastHLine(x + 16, y + 64, w - 32, muted);
+  tft.drawFastHLine(x + 16, y + 148, w - 32, muted);
+  tft.drawFastHLine(x + 16, y + 190, w - 32, muted);
 
   tft.setTextColor(accent, ST77XX_BLACK);
   tft.setTextSize(2);
@@ -56,28 +58,28 @@ void drawCard(int x, int y, int w, int h) {
   tft.setCursor(x + 16, y + 46);
   tft.print("5h");
 
-  tft.setTextSize(5);
-  tft.setCursor(x + 16, y + 70);
+  tft.setTextSize(4);
+  tft.setCursor(x + w - 86, y + 42);
   tft.print(String(codex.windowPct) + "%");
 
-  tft.drawRoundRect(x + 16, y + 116, w - 32, 24, 9, muted);
-  tft.fillRoundRect(x + 19, y + 119, (w - 38) * codex.windowPct / 100, 18, 7, accent);
+  tft.drawRoundRect(x + 16, y + 84, w - 32, 34, 11, muted);
+  tft.fillRoundRect(x + 19, y + 87, (w - 38) * codex.windowPct / 100, 28, 8, accent);
 
   tft.setTextColor(frame, ST77XX_BLACK);
   tft.setTextSize(2);
-  tft.setCursor(x + 16, y + 150);
+  tft.setCursor(x + 16, y + 132);
   tft.print("7d");
 
-  tft.drawRoundRect(x + 16, y + 176, w - 32, 24, 9, muted);
-  tft.fillRoundRect(x + 19, y + 179, (w - 38) * codex.weekPct / 100, 18, 7, weekAccent);
-  drawCenteredText(String(codex.weekPct) + "%", x + w / 2, y + 181, 2, ST77XX_BLACK, weekAccent);
+  tft.drawRoundRect(x + 16, y + 158, w - 32, 24, 9, muted);
+  tft.fillRoundRect(x + 19, y + 161, (w - 38) * codex.weekPct / 100, 18, 7, weekAccent);
+  drawCenteredText(String(codex.weekPct) + "%", x + w / 2, y + 163, 2, ST77XX_WHITE, ST77XX_BLACK);
 
   tft.setTextColor(muted, ST77XX_BLACK);
   tft.setTextSize(2);
-  tft.setCursor(x + 16, y + 208);
+  tft.setCursor(x + 16, y + 198);
   tft.print("Reset");
   tft.setTextColor(frame, ST77XX_BLACK);
-  tft.setCursor(x + 92, y + 208);
+  tft.setCursor(x + 92, y + 198);
   tft.print(codex.resetText);
 }
 
