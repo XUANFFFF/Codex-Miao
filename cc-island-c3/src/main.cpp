@@ -25,7 +25,7 @@ constexpr int16_t kScreenWidth = 240;
 constexpr int16_t kScreenHeight = 240;
 constexpr size_t kSerialBufferLimit = 384;
 constexpr size_t kJsonDocCapacity = 384;
-constexpr uint8_t kTransitionStepsPerHalf = 4;
+constexpr uint8_t kTransitionStepsPerHalf = 8;
 constexpr uint8_t kTransitionPhaseCount = kTransitionStepsPerHalf * 2;
 
 SPIClass spi(FSPI);
@@ -38,6 +38,7 @@ UsageData usageData;
 String serialBuffer;
 bool serialLineOverflowed = false;
 ScreenMode lastRenderedMode = ScreenMode::Face;
+bool usageCardDirty = true;
 bool transitionWasActive = false;
 TransitionDirection lastTransitionDirection = TransitionDirection::None;
 ScreenMode lastTransitionTargetMode = ScreenMode::Face;
@@ -144,7 +145,9 @@ void resetFaceToIdle() {
 void updateDisplay() {
   const uint32_t nowMs = millis();
   const ScreenMode desiredMode =
-      usageStateTracker.isUsageActive(nowMs) ? ScreenMode::UsageCard : ScreenMode::Face;
+      (usageStateTracker.hasData() && usageStateTracker.isUsageActive(nowMs))
+          ? ScreenMode::UsageCard
+          : ScreenMode::Face;
 
   screenModeController.setMode(desiredMode, nowMs);
   screenModeController.update(nowMs);
@@ -166,7 +169,7 @@ void updateDisplay() {
     resetFaceToIdle();
   }
 
-  faceRenderer.update(nowMs);
+  const bool faceChanged = faceRenderer.update(nowMs);
 
   if (transition.active) {
     const uint8_t transitionPhase = computeTransitionPhase(transition.progress);
@@ -176,8 +179,14 @@ void updateDisplay() {
         const bool revealNeedsFullRedraw =
             lastTransitionPhase <= kTransitionStepsPerHalf || targetMode == ScreenMode::UsageCard;
         renderMode(targetMode, revealNeedsFullRedraw);
+        if (targetMode == ScreenMode::UsageCard) {
+          usageCardDirty = false;
+        }
       } else if (transitionJustStarted || fullRedraw) {
         renderMode(currentMode, true);
+        if (currentMode == ScreenMode::UsageCard) {
+          usageCardDirty = false;
+        }
       }
 
       drawTransitionCover(transition.direction, transitionPhase);
@@ -187,7 +196,16 @@ void updateDisplay() {
     lastTransitionDirection = transition.direction;
     lastTransitionTargetMode = targetMode;
   } else {
-    renderMode(currentMode, fullRedraw);
+    const bool modeChanged = currentMode != lastRenderedMode;
+    if (currentMode == ScreenMode::UsageCard) {
+      if (fullRedraw || modeChanged || usageCardDirty) {
+        renderMode(currentMode, fullRedraw || modeChanged);
+        usageCardDirty = false;
+      }
+    } else if (fullRedraw || modeChanged || faceChanged) {
+      renderMode(currentMode, fullRedraw || modeChanged);
+    }
+
     lastRenderedMode = currentMode;
     transitionWasActive = false;
     lastTransitionDirection = TransitionDirection::None;
@@ -205,6 +223,15 @@ bool applyJsonPayload(const String& line) {
   DeserializationError err = deserializeJson(doc, line);
   if (err) {
     return false;
+  }
+
+  const char* displayMode = doc["display_mode"] | "";
+  const char* bridgeState = doc["bridge_state"] | "";
+  if (strcmp(displayMode, "face") == 0 || strcmp(bridgeState, "offline") == 0) {
+    usageStateTracker.forceIdle();
+    usageCardDirty = true;
+    updateDisplay();
+    return true;
   }
 
   UsageData nextData = usageData;
@@ -238,6 +265,7 @@ bool applyJsonPayload(const String& line) {
   }
 
   if (dataChanged || hasMeaningfulActivity) {
+    usageCardDirty = true;
     updateDisplay();
   }
 
@@ -250,6 +278,7 @@ void setSyncText(const char* text) {
   }
 
   copyBoundedText(usageData.syncText, kSyncTextCapacity, text);
+  usageCardDirty = true;
   updateDisplay();
 }
 
@@ -358,5 +387,5 @@ void loop() {
 
   fetchFromBridge();
   updateDisplay();
-  delay(50);
+  delay(25);
 }

@@ -9,10 +9,15 @@
 
 class FaceRenderer {
  public:
+  static constexpr int16_t kEyeCanvasW = 68;
+  static constexpr int16_t kEyeCanvasH = 84;
+  static constexpr int16_t kLowerCanvasW = 168;
+  static constexpr int16_t kLowerCanvasH = 56;
+
   explicit FaceRenderer(Adafruit_ST7789& tft);
 
   void begin();
-  void update(uint32_t nowMs);
+  bool update(uint32_t nowMs);
   void render(bool fullRedraw);
   void setExpression(FaceExpression expression, bool hold = false);
   void clearExpressionHold();
@@ -27,9 +32,11 @@ class FaceRenderer {
   void updateGaze(uint32_t nowMs);
   void updateBob(uint32_t nowMs);
   void drawEye(int16_t centerX, int16_t centerY, int16_t width, int16_t height, bool leftEye);
-  void drawMouth();
+  void drawLowerFace();
 
   Adafruit_ST7789& tft_;
+  GFXcanvas16 eyeCanvas_;
+  GFXcanvas16 lowerCanvas_;
   FaceState state_;
   uint32_t nextBlinkAtMs_ = 0;
   uint32_t blinkEndsAtMs_ = 0;

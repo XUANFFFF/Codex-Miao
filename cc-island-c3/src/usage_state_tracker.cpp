@@ -43,6 +43,15 @@ const UsageData& UsageStateTracker::data() const {
   return current_;
 }
 
+void UsageStateTracker::forceIdle() {
+  activeUntilMs_ = 0;
+  initialized_ = false;
+}
+
+bool UsageStateTracker::hasData() const {
+  return initialized_;
+}
+
 bool UsageStateTracker::isUsageActive(uint32_t nowMs) const {
   return activeUntilMs_ != 0 && static_cast<int32_t>(activeUntilMs_ - nowMs) > 0;
 }

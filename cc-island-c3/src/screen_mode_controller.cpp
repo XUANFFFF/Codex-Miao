@@ -12,7 +12,9 @@ uint8_t computeProgress(uint32_t nowMs, const TransitionState& state) {
     return 255;
   }
 
-  return static_cast<uint8_t>((elapsed * 255U) / state.durationMs);
+  const uint32_t linear = (elapsed * 255U) / state.durationMs;
+  const uint32_t eased = (linear * linear * (765U - 2U * linear)) / 65025U;
+  return static_cast<uint8_t>(eased);
 }
 
 TransitionDirection transitionDirectionFor(ScreenMode nextMode) {

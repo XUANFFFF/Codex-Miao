@@ -26,11 +26,11 @@ constexpr size_t kResetTextCapacity = 6;
 constexpr size_t kSyncTextCapacity = 16;
 
 struct UsageData {
-  uint8_t windowPct = 41;
-  uint8_t weekPct = 17;
-  uint16_t resetMin = 133;
-  char resetText[kResetTextCapacity] = "--:--";
-  char syncText[kSyncTextCapacity] = "waiting";
+  uint8_t windowPct = 0;
+  uint8_t weekPct = 0;
+  uint16_t resetMin = 0;
+  char resetText[kResetTextCapacity] = "--";
+  char syncText[kSyncTextCapacity] = "";
 };
 
 struct FaceState {
@@ -47,6 +47,6 @@ struct TransitionState {
   TransitionDirection direction = TransitionDirection::None;
   bool active = false;
   uint32_t startedAtMs = 0;
-  uint16_t durationMs = 320;
+  uint16_t durationMs = 420;
   uint8_t progress = 0;
 };

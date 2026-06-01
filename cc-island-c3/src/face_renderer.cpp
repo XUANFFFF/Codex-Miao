@@ -21,7 +21,17 @@ constexpr int16_t kEyeHeight = 60;
 constexpr int16_t kEyeCorner = 18;
 constexpr int16_t kMinEyeHeight = 8;
 constexpr int16_t kMinInternalEyeHeight = 22;
-constexpr uint32_t kExpressionHoldMs = 5000;
+constexpr int16_t kEyeClearPadX = 10;
+constexpr int16_t kEyeClearPadY = 12;
+constexpr int16_t kMouthClearX = 88;
+constexpr int16_t kMouthClearY = 148;
+constexpr int16_t kMouthClearW = 64;
+constexpr int16_t kMouthClearH = 28;
+constexpr int16_t kBlushRadius = 8;
+constexpr int16_t kBlushClearPad = 3;
+constexpr int16_t kLowerFaceCenterX = 120;
+constexpr int16_t kLowerFaceCenterY = 160;
+constexpr uint32_t kExpressionHoldMs = 600000;
 constexpr FaceExpression kExpressionCycle[] = {
     FaceExpression::Neutral,
     FaceExpression::Happy,
@@ -37,9 +47,19 @@ int16_t maxEyeHeight(int16_t value) {
 int16_t minValue(int16_t a, int16_t b) {
   return a < b ? a : b;
 }
+
+bool faceStatesEqual(const FaceState& left, const FaceState& right) {
+  return left.expression == right.expression && left.eyeOpen == right.eyeOpen &&
+         left.gazeX == right.gazeX && left.gazeY == right.gazeY &&
+         left.bobY == right.bobY && left.showBlush == right.showBlush &&
+         left.accentColor == right.accentColor;
+}
 }  // namespace
 
-FaceRenderer::FaceRenderer(Adafruit_ST7789& tft) : tft_(tft) {}
+FaceRenderer::FaceRenderer(Adafruit_ST7789& tft)
+    : tft_(tft),
+      eyeCanvas_(FaceRenderer::kEyeCanvasW, FaceRenderer::kEyeCanvasH),
+      lowerCanvas_(FaceRenderer::kLowerCanvasW, FaceRenderer::kLowerCanvasH) {}
 
 void FaceRenderer::begin() {
   const uint32_t nowMs = millis();
@@ -52,27 +72,22 @@ void FaceRenderer::begin() {
   applyExpression(FaceExpression::Neutral);
 }
 
-void FaceRenderer::update(uint32_t nowMs) {
+bool FaceRenderer::update(uint32_t nowMs) {
+  const FaceState previous = state_;
   pickNextExpression(nowMs);
   updateBlink(nowMs);
   updateGaze(nowMs);
   updateBob(nowMs);
+  return !faceStatesEqual(previous, state_);
 }
 
 void FaceRenderer::render(bool fullRedraw) {
   if (fullRedraw) {
     tft_.fillScreen(kBg);
   }
-
-  tft_.fillRect(kFaceBoundsX, kFaceBoundsY, kFaceBoundsW, kFaceBoundsH, kBg);
   drawEye(kLeftEyeX, kEyeY + static_cast<int16_t>(state_.bobY), kEyeWidth, kEyeHeight, true);
   drawEye(kRightEyeX, kEyeY + static_cast<int16_t>(state_.bobY), kEyeWidth, kEyeHeight, false);
-  drawMouth();
-
-  if (state_.showBlush) {
-    tft_.fillCircle(52, 145 + static_cast<int16_t>(state_.bobY), 8, kAccentPink);
-    tft_.fillCircle(188, 145 + static_cast<int16_t>(state_.bobY), 8, kAccentPink);
-  }
+  drawLowerFace();
 }
 
 void FaceRenderer::setExpression(FaceExpression expression, bool hold) {
@@ -154,25 +169,33 @@ void FaceRenderer::updateBob(uint32_t nowMs) {
 }
 
 void FaceRenderer::drawEye(int16_t centerX, int16_t centerY, int16_t width, int16_t height, bool leftEye) {
+  eyeCanvas_.fillScreen(kBg);
+
+  const int16_t canvasX = centerX - (FaceRenderer::kEyeCanvasW / 2);
+  const int16_t canvasY = centerY - (FaceRenderer::kEyeCanvasH / 2);
   const int16_t eyeHeight = maxEyeHeight(static_cast<int16_t>(height * state_.eyeOpen));
-  const int16_t eyeX = centerX - width / 2;
-  const int16_t eyeY = centerY - eyeHeight / 2;
+  const int16_t eyeX = (FaceRenderer::kEyeCanvasW - width) / 2;
+  const int16_t eyeY = (FaceRenderer::kEyeCanvasH - eyeHeight) / 2;
   const int16_t cornerRadius = minValue(kEyeCorner, minValue(width / 2, eyeHeight / 2));
 
-  tft_.fillRoundRect(eyeX, eyeY, width, eyeHeight, cornerRadius, kEyeWhite);
+  eyeCanvas_.fillRoundRect(eyeX, eyeY, width, eyeHeight, cornerRadius, kEyeWhite);
 
   if (eyeHeight < kMinInternalEyeHeight) {
+    tft_.drawRGBBitmap(canvasX, canvasY, eyeCanvas_.getBuffer(), FaceRenderer::kEyeCanvasW,
+                       FaceRenderer::kEyeCanvasH);
     return;
   }
 
   const int16_t pupilR = state_.expression == FaceExpression::Curious ? 10 : 8;
   const int16_t eyeInteriorHalfHeight = eyeHeight / 2 - pupilR - 2;
   if (eyeInteriorHalfHeight <= 0) {
+    tft_.drawRGBBitmap(canvasX, canvasY, eyeCanvas_.getBuffer(), FaceRenderer::kEyeCanvasW,
+                       FaceRenderer::kEyeCanvasH);
     return;
   }
 
-  int16_t pupilX = centerX + static_cast<int16_t>(state_.gazeX);
-  int16_t pupilY = centerY + static_cast<int16_t>(state_.gazeY);
+  int16_t pupilX = (FaceRenderer::kEyeCanvasW / 2) + static_cast<int16_t>(state_.gazeX);
+  int16_t pupilY = (FaceRenderer::kEyeCanvasH / 2) + static_cast<int16_t>(state_.gazeY);
   const int16_t pupilMinX = eyeX + pupilR + 4;
   const int16_t pupilMaxX = eyeX + width - pupilR - 4;
   if (pupilX < pupilMinX) {
@@ -181,17 +204,20 @@ void FaceRenderer::drawEye(int16_t centerX, int16_t centerY, int16_t width, int1
     pupilX = pupilMaxX;
   }
 
-  const int16_t pupilMinY = centerY - eyeInteriorHalfHeight;
-  const int16_t pupilMaxY = centerY + eyeInteriorHalfHeight;
+  const int16_t pupilCenterY = FaceRenderer::kEyeCanvasH / 2;
+  const int16_t pupilMinY = pupilCenterY - eyeInteriorHalfHeight;
+  const int16_t pupilMaxY = pupilCenterY + eyeInteriorHalfHeight;
   if (pupilY < pupilMinY) {
     pupilY = pupilMinY;
   } else if (pupilY > pupilMaxY) {
     pupilY = pupilMaxY;
   }
 
-  tft_.fillCircle(pupilX, pupilY, pupilR, kBg);
+  eyeCanvas_.fillCircle(pupilX, pupilY, pupilR, kBg);
 
   if (eyeHeight < (kMinInternalEyeHeight + 6)) {
+    tft_.drawRGBBitmap(canvasX, canvasY, eyeCanvas_.getBuffer(), FaceRenderer::kEyeCanvasW,
+                       FaceRenderer::kEyeCanvasH);
     return;
   }
 
@@ -199,44 +225,59 @@ void FaceRenderer::drawEye(int16_t centerX, int16_t centerY, int16_t width, int1
   const int16_t highlightY = pupilY - 5;
   const int16_t highlightMinY = eyeY + 5;
   if (highlightY >= highlightMinY) {
-    tft_.fillCircle(highlightX, highlightY, 3, state_.accentColor);
+    eyeCanvas_.fillCircle(highlightX, highlightY, 3, state_.accentColor);
   }
 
   if (state_.expression == FaceExpression::AngryPout) {
     const int16_t browY = eyeY - 7;
     if (leftEye) {
-      tft_.drawLine(eyeX + 4, browY + 3, eyeX + width - 2, browY, state_.accentColor);
+      eyeCanvas_.drawLine(eyeX + 4, browY + 3, eyeX + width - 2, browY, state_.accentColor);
     } else {
-      tft_.drawLine(eyeX + 2, browY, eyeX + width - 4, browY + 3, state_.accentColor);
+      eyeCanvas_.drawLine(eyeX + 2, browY, eyeX + width - 4, browY + 3, state_.accentColor);
     }
   } else if (state_.expression == FaceExpression::Sleepy) {
-    tft_.drawFastHLine(eyeX + 6, eyeY + 4, width - 12, kAccentWarm);
+    eyeCanvas_.drawFastHLine(eyeX + 6, eyeY + 4, width - 12, kAccentWarm);
   }
+
+  tft_.drawRGBBitmap(canvasX, canvasY, eyeCanvas_.getBuffer(), FaceRenderer::kEyeCanvasW,
+                     FaceRenderer::kEyeCanvasH);
 }
 
-void FaceRenderer::drawMouth() {
-  const int16_t mouthY = 160 + static_cast<int16_t>(state_.bobY);
-  tft_.fillRect(92, 150, 56, 24, kBg);
+void FaceRenderer::drawLowerFace() {
+  lowerCanvas_.fillScreen(kBg);
+  const int16_t canvasX = kLowerFaceCenterX - (FaceRenderer::kLowerCanvasW / 2);
+  const int16_t canvasY = kLowerFaceCenterY - (FaceRenderer::kLowerCanvasH / 2);
+  const int16_t mouthY =
+      (FaceRenderer::kLowerCanvasH / 2) + static_cast<int16_t>(state_.bobY);
 
   switch (state_.expression) {
     case FaceExpression::Happy:
-      tft_.drawRoundRect(96, mouthY, 48, 10, 5, kMouthWhite);
-      tft_.drawPixel(100, mouthY + 4, kMouthWhite);
-      tft_.drawPixel(140, mouthY + 4, kMouthWhite);
+      lowerCanvas_.drawRoundRect(72, mouthY, 48, 10, 5, kMouthWhite);
+      lowerCanvas_.drawPixel(76, mouthY + 4, kMouthWhite);
+      lowerCanvas_.drawPixel(116, mouthY + 4, kMouthWhite);
       break;
     case FaceExpression::Curious:
-      tft_.drawCircle(120, mouthY + 5, 5, kMouthWhite);
+      lowerCanvas_.drawCircle(FaceRenderer::kLowerCanvasW / 2, mouthY + 5, 5, kMouthWhite);
       break;
     case FaceExpression::Sleepy:
-      tft_.drawFastHLine(102, mouthY + 4, 36, kMouthWhite);
+      lowerCanvas_.drawFastHLine(78, mouthY + 4, 36, kMouthWhite);
       break;
     case FaceExpression::AngryPout:
-      tft_.drawLine(100, mouthY + 8, 120, mouthY + 12, kMouthWhite);
-      tft_.drawLine(120, mouthY + 12, 140, mouthY + 8, kMouthWhite);
+      lowerCanvas_.drawLine(76, mouthY + 8, 96, mouthY + 12, kMouthWhite);
+      lowerCanvas_.drawLine(96, mouthY + 12, 116, mouthY + 8, kMouthWhite);
       break;
     case FaceExpression::Neutral:
     default:
-      tft_.drawFastHLine(102, mouthY + 6, 36, kMouthWhite);
+      lowerCanvas_.drawFastHLine(78, mouthY + 6, 36, kMouthWhite);
       break;
   }
+
+  if (state_.showBlush) {
+    const int16_t blushY = 13 + static_cast<int16_t>(state_.bobY);
+    lowerCanvas_.fillCircle(16, blushY, kBlushRadius, kAccentPink);
+    lowerCanvas_.fillCircle(FaceRenderer::kLowerCanvasW - 16, blushY, kBlushRadius, kAccentPink);
+  }
+
+  tft_.drawRGBBitmap(canvasX, canvasY, lowerCanvas_.getBuffer(), FaceRenderer::kLowerCanvasW,
+                     FaceRenderer::kLowerCanvasH);
 }

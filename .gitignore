@@ -7,3 +7,4 @@ __pycache__/
 Thumbs.db
 .DS_Store
 *.tmp
+cc-island-c3/pc_bridge/bridge_mode.json

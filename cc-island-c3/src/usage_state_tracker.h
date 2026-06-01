@@ -13,6 +13,8 @@ class UsageStateTracker {
   // Returns true only when the payload counts as meaningful usage activity.
   bool applyIncomingData(const UsageData& incoming, uint32_t nowMs);
   const UsageData& data() const;
+  void forceIdle();
+  bool hasData() const;
   bool isUsageActive(uint32_t nowMs) const;
   uint32_t activeUntilMs() const;
 

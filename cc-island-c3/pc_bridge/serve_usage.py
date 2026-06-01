@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_AUTH_PATH = Path(os.environ.get("USERPROFILE", "")) / ".codex" / "auth.json"
 DEFAULT_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+DEFAULT_MODE_PATH = Path(__file__).with_name("bridge_mode.json")
 
 
 def request_json(url: str, headers: dict) -> dict:
@@ -82,15 +83,45 @@ def build_payload_from_usage(payload: dict) -> dict:
     }
 
 
-def make_handler(auth_path: Path):
+def read_bridge_mode(mode_path: Path) -> str:
+    try:
+        data = json.loads(mode_path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return "live"
+    except Exception:
+        return "live"
+    mode = str(data.get("mode") or "live").strip().lower()
+    return mode if mode else "live"
+
+
+def make_handler(auth_path: Path, mode_path: Path):
     class UsageHandler(BaseHTTPRequestHandler):
         def do_GET(self):
+            if self.path == "/health":
+                payload = {
+                    "ok": True,
+                    "bridge_state": read_bridge_mode(mode_path),
+                }
+                body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
             if self.path != "/usage":
                 self.send_response(404)
                 self.end_headers()
                 return
             try:
-                payload = build_payload_from_usage(fetch_wham_usage(auth_path))
+                if read_bridge_mode(mode_path) == "offline":
+                    payload = {
+                        "display_mode": "face",
+                        "bridge_state": "offline",
+                    }
+                else:
+                    payload = build_payload_from_usage(fetch_wham_usage(auth_path))
                 body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -116,9 +147,10 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0", help="Bind host")
     parser.add_argument("--port", type=int, default=8765, help="Bind port")
     parser.add_argument("--auth-path", type=Path, default=DEFAULT_AUTH_PATH, help="Path to auth.json")
+    parser.add_argument("--mode-path", type=Path, default=DEFAULT_MODE_PATH, help="Path to bridge mode json")
     args = parser.parse_args()
 
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(args.auth_path))
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(args.auth_path, args.mode_path))
     print(f"Serving usage bridge on http://{args.host}:{args.port}/usage")
     server.serve_forever()
 
