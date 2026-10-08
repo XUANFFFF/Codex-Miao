@@ -8,10 +8,18 @@ constexpr uint16_t kFrame = ST77XX_WHITE;
 constexpr uint16_t kAccent = ST77XX_CYAN;
 constexpr uint16_t kMuted = ST77XX_BLUE;
 constexpr uint16_t kWeekAccent = ST77XX_MAGENTA;
+constexpr uint16_t kBadgeLampGreen = 0x07E0;
+constexpr uint16_t kBadgeLampYellow = 0xFE60;
+constexpr uint16_t kBadgeLampRed = 0xF800;
 
 constexpr int16_t kCardX = 16;
 constexpr int16_t kCardY = 2;
 constexpr int16_t kCardW = 208;
+constexpr int16_t kBadgeX = 174;
+constexpr int16_t kBadgeY = 208;
+constexpr int16_t kBadgeW = 60;
+constexpr int16_t kBadgeH = 30;
+constexpr int16_t kLampRadius = 7;
 
 constexpr int16_t kWindowBarW = kCardW - 38;
 constexpr int16_t kWeekBarW = kCardW - 38;
@@ -54,17 +62,46 @@ void copyBoundedText(char* dest, size_t destCapacity, const char* src, size_t sr
   }
   dest[copyLength] = '\0';
 }
+
+bool signalOverlayStatesEqual(const SignalOverlayState& left, const SignalOverlayState& right) {
+  return left.visible == right.visible && left.signal == right.signal;
+}
+
+uint16_t activeLampColor(AgentSignalState signal) {
+  switch (signal) {
+    case AgentSignalState::Idle:
+      return kBadgeLampGreen;
+    case AgentSignalState::Thinking:
+    case AgentSignalState::Working:
+      return kBadgeLampYellow;
+    case AgentSignalState::Permission:
+    case AgentSignalState::Blocked:
+      return kBadgeLampRed;
+    default:
+      return kBadgeLampGreen;
+  }
+}
+
 }  // namespace
 
 UsageCardRenderer::UsageCardRenderer(Adafruit_ST7789& tft) : tft_(tft) {}
 
-void UsageCardRenderer::renderFrame(const UsageData& data, bool fullRedraw) {
+void UsageCardRenderer::renderFrame(const UsageData& data, bool fullRedraw,
+                                    const SignalOverlayState& overlay) {
   if (fullRedraw) {
     tft_.fillScreen(kBg);
     drawStaticCard();
+    signalBadgeDrawn_ = false;
   }
 
   drawDynamicCard(data);
+  if (fullRedraw || !signalBadgeDrawn_ || !signalOverlayStatesEqual(lastSignalOverlay_, overlay)) {
+    drawSignalBadge(overlay);
+  }
+}
+
+void UsageCardRenderer::renderFrame(const UsageData& data, bool fullRedraw) {
+  renderFrame(data, fullRedraw, SignalOverlayState{});
 }
 
 void UsageCardRenderer::drawStaticCard() {
@@ -99,13 +136,18 @@ void UsageCardRenderer::drawStaticCard() {
 }
 
 void UsageCardRenderer::drawDynamicCard(const UsageData& data) {
-  const uint8_t windowPct = clampPct(data.windowPct);
-  const uint8_t weekPct = clampPct(data.weekPct);
+  const uint8_t windowPct = data.usageAvailable ? clampPct(data.windowPct) : 0;
+  const uint8_t weekPct = data.usageAvailable ? clampPct(data.weekPct) : 0;
   char pctText[5];
   char weekPctText[5];
 
-  snprintf(pctText, sizeof(pctText), "%u%%", static_cast<unsigned>(windowPct));
-  snprintf(weekPctText, sizeof(weekPctText), "%u%%", static_cast<unsigned>(weekPct));
+  if (data.usageAvailable) {
+    snprintf(pctText, sizeof(pctText), "%u%%", static_cast<unsigned>(windowPct));
+    snprintf(weekPctText, sizeof(weekPctText), "%u%%", static_cast<unsigned>(weekPct));
+  } else {
+    snprintf(pctText, sizeof(pctText), "--");
+    snprintf(weekPctText, sizeof(weekPctText), "--");
+  }
 
   drawBoundedText(kPercentBoxX, kCardY + 10, pctText, sizeof(pctText), 5, kFrame, kPercentBoxW,
                   true);
@@ -118,10 +160,24 @@ void UsageCardRenderer::drawDynamicCard(const UsageData& data) {
   drawBoundedText(kWeekPctBoxX + 4, kCardY + 134, weekPctText, sizeof(weekPctText), 2, kFrame,
                   kWeekPctBoxW - 4);
 
-  drawBoundedText(kResetTextX, kResetTextY, data.resetText, kResetTextCapacity, 2, kFrame,
-                  kResetTextW);
+  const char* resetText = data.usageAvailable ? data.resetText : "--:--";
+  drawBoundedText(kResetTextX, kResetTextY, resetText, kResetTextCapacity, 2, kFrame, kResetTextW);
   drawBoundedText(kSyncTextX, kSyncTextY, data.syncText, kSyncTextCapacity, 1, kMuted,
                   kSyncTextW);
+}
+
+void UsageCardRenderer::drawSignalBadge(const SignalOverlayState& overlay) {
+  clearRect(kBadgeX, kBadgeY, kBadgeW, kBadgeH);
+  lastSignalOverlay_ = overlay;
+  signalBadgeDrawn_ = true;
+  if (!overlay.visible) {
+    return;
+  }
+
+  const uint16_t activeColor = activeLampColor(overlay.signal);
+  const int16_t lampX = kBadgeX + (kBadgeW / 2);
+  const int16_t lampY = kBadgeY + (kBadgeH / 2);
+  tft_.fillCircle(lampX, lampY, kLampRadius, activeColor);
 }
 
 void UsageCardRenderer::drawBoundedText(int16_t x, int16_t y, const char* text, size_t capacity,

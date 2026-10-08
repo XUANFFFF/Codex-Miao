@@ -18,6 +18,7 @@ class FaceRenderer {
 
   void begin();
   bool update(uint32_t nowMs);
+  void render(bool fullRedraw, const SignalOverlayState& overlay);
   void render(bool fullRedraw);
   void setExpression(FaceExpression expression, bool hold = false);
   void clearExpressionHold();
@@ -31,6 +32,7 @@ class FaceRenderer {
   void updateBlink(uint32_t nowMs);
   void updateGaze(uint32_t nowMs);
   void updateBob(uint32_t nowMs);
+  void drawSignalBadge(const SignalOverlayState& overlay);
   void drawEye(int16_t centerX, int16_t centerY, int16_t width, int16_t height, bool leftEye);
   void drawLowerFace();
 
@@ -38,10 +40,12 @@ class FaceRenderer {
   GFXcanvas16 eyeCanvas_;
   GFXcanvas16 lowerCanvas_;
   FaceState state_;
+  SignalOverlayState lastSignalOverlay_{};
   uint32_t nextBlinkAtMs_ = 0;
   uint32_t blinkEndsAtMs_ = 0;
   uint32_t nextGazeAtMs_ = 0;
   uint32_t lastExpressionAtMs_ = 0;
   bool autoCycleEnabled_ = true;
   bool expressionHoldActive_ = false;
+  bool signalBadgeDrawn_ = false;
 };
