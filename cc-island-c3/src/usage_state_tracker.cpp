@@ -21,9 +21,8 @@ UsageStateTracker::UsageStateTracker() = default;
 
 bool UsageStateTracker::applyIncomingData(const UsageData& incoming, uint32_t nowMs) {
   const bool hasMeaningfulActivity =
-      !initialized_ || incoming.windowPct != current_.windowPct ||
-      incoming.weekPct != current_.weekPct ||
-      !textEquals(incoming.resetText, current_.resetText, kResetTextCapacity);
+      initialized_ &&
+      (incoming.windowPct < current_.windowPct || incoming.weekPct < current_.weekPct);
 
   current_.windowPct = incoming.windowPct;
   current_.weekPct = incoming.weekPct;

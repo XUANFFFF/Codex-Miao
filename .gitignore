@@ -7,4 +7,15 @@ __pycache__/
 Thumbs.db
 .DS_Store
 *.tmp
+
+# Local-only agent memory and machine-specific Wi-Fi credentials
+.workbuddy/
+cc-island-c3/src/wifi_secrets.h
 cc-island-c3/pc_bridge/bridge_mode.json
+
+# Keep local planning notes and hardware diagnostics out of commits
+cc-island-c3/docs/
+serial_diag/
+st7789_diag/
+st7789_hwspi/
+st7789_test/

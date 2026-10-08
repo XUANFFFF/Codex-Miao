@@ -22,6 +22,20 @@ enum class TransitionDirection : uint8_t {
   CardToFace,
 };
 
+enum class AgentSignalState : uint8_t {
+  Idle,
+  Thinking,
+  Working,
+  Permission,
+  Blocked,
+};
+
+enum class SignalPageKind : uint8_t {
+  None,
+  Permission,
+  Blocked,
+};
+
 constexpr size_t kResetTextCapacity = 6;
 constexpr size_t kSyncTextCapacity = 16;
 
@@ -29,8 +43,8 @@ struct UsageData {
   uint8_t windowPct = 0;
   uint8_t weekPct = 0;
   uint16_t resetMin = 0;
-  char resetText[kResetTextCapacity] = "--";
-  char syncText[kSyncTextCapacity] = "";
+  char resetText[kResetTextCapacity] = "--:--";
+  char syncText[kSyncTextCapacity] = "waiting";
 };
 
 struct FaceState {
@@ -41,6 +55,16 @@ struct FaceState {
   float bobY = 0.0f;
   bool showBlush = false;
   uint16_t accentColor = 0;
+};
+
+struct SignalOverlayState {
+  AgentSignalState signal = AgentSignalState::Idle;
+  bool visible = true;
+};
+
+struct SignalPageState {
+  SignalPageKind kind = SignalPageKind::None;
+  uint32_t holdUntilMs = 0;
 };
 
 struct TransitionState {

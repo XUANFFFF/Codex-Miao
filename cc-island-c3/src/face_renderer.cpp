@@ -9,10 +9,14 @@ constexpr uint16_t kMouthWhite = ST77XX_WHITE;
 constexpr uint16_t kAccentCyan = ST77XX_CYAN;
 constexpr uint16_t kAccentPink = 0xF81F;
 constexpr uint16_t kAccentWarm = 0xFD20;
-constexpr int16_t kFaceBoundsX = 28;
-constexpr int16_t kFaceBoundsY = 42;
-constexpr int16_t kFaceBoundsW = 184;
-constexpr int16_t kFaceBoundsH = 142;
+constexpr uint16_t kBadgeLampGreen = 0x07E0;
+constexpr uint16_t kBadgeLampYellow = 0xFE60;
+constexpr uint16_t kBadgeLampRed = 0xF800;
+constexpr int16_t kBadgeX = 180;
+constexpr int16_t kBadgeY = 208;
+constexpr int16_t kBadgeW = 60;
+constexpr int16_t kBadgeH = 30;
+constexpr int16_t kLampRadius = 7;
 constexpr int16_t kEyeY = 96;
 constexpr int16_t kLeftEyeX = 78;
 constexpr int16_t kRightEyeX = 162;
@@ -21,17 +25,13 @@ constexpr int16_t kEyeHeight = 60;
 constexpr int16_t kEyeCorner = 18;
 constexpr int16_t kMinEyeHeight = 8;
 constexpr int16_t kMinInternalEyeHeight = 22;
-constexpr int16_t kEyeClearPadX = 10;
-constexpr int16_t kEyeClearPadY = 12;
-constexpr int16_t kMouthClearX = 88;
-constexpr int16_t kMouthClearY = 148;
-constexpr int16_t kMouthClearW = 64;
-constexpr int16_t kMouthClearH = 28;
 constexpr int16_t kBlushRadius = 8;
-constexpr int16_t kBlushClearPad = 3;
 constexpr int16_t kLowerFaceCenterX = 120;
 constexpr int16_t kLowerFaceCenterY = 160;
 constexpr uint32_t kExpressionHoldMs = 600000;
+constexpr uint32_t kBlinkInitialDelayMs = 36000;
+constexpr uint32_t kBlinkBaseIntervalMs = 36000;
+constexpr uint32_t kBlinkVarianceWindowMs = 34000;
 constexpr FaceExpression kExpressionCycle[] = {
     FaceExpression::Neutral,
     FaceExpression::Happy,
@@ -54,6 +54,26 @@ bool faceStatesEqual(const FaceState& left, const FaceState& right) {
          left.bobY == right.bobY && left.showBlush == right.showBlush &&
          left.accentColor == right.accentColor;
 }
+
+bool signalOverlayStatesEqual(const SignalOverlayState& left, const SignalOverlayState& right) {
+  return left.visible == right.visible && left.signal == right.signal;
+}
+
+uint16_t activeLampColor(AgentSignalState signal) {
+  switch (signal) {
+    case AgentSignalState::Idle:
+      return kBadgeLampGreen;
+    case AgentSignalState::Thinking:
+    case AgentSignalState::Working:
+      return kBadgeLampYellow;
+    case AgentSignalState::Permission:
+    case AgentSignalState::Blocked:
+      return kBadgeLampRed;
+    default:
+      return kBadgeLampGreen;
+  }
+}
+
 }  // namespace
 
 FaceRenderer::FaceRenderer(Adafruit_ST7789& tft)
@@ -63,12 +83,14 @@ FaceRenderer::FaceRenderer(Adafruit_ST7789& tft)
 
 void FaceRenderer::begin() {
   const uint32_t nowMs = millis();
-  nextBlinkAtMs_ = nowMs + 1800;
+  nextBlinkAtMs_ = nowMs + kBlinkInitialDelayMs;
   nextGazeAtMs_ = nowMs + 900;
   lastExpressionAtMs_ = nowMs;
   state_ = FaceState{};
   autoCycleEnabled_ = true;
   expressionHoldActive_ = false;
+  signalBadgeDrawn_ = false;
+  lastSignalOverlay_ = SignalOverlayState{};
   applyExpression(FaceExpression::Neutral);
 }
 
@@ -81,13 +103,22 @@ bool FaceRenderer::update(uint32_t nowMs) {
   return !faceStatesEqual(previous, state_);
 }
 
-void FaceRenderer::render(bool fullRedraw) {
+void FaceRenderer::render(bool fullRedraw, const SignalOverlayState& overlay) {
   if (fullRedraw) {
     tft_.fillScreen(kBg);
+    signalBadgeDrawn_ = false;
   }
+
   drawEye(kLeftEyeX, kEyeY + static_cast<int16_t>(state_.bobY), kEyeWidth, kEyeHeight, true);
   drawEye(kRightEyeX, kEyeY + static_cast<int16_t>(state_.bobY), kEyeWidth, kEyeHeight, false);
   drawLowerFace();
+  if (fullRedraw || !signalBadgeDrawn_ || !signalOverlayStatesEqual(lastSignalOverlay_, overlay)) {
+    drawSignalBadge(overlay);
+  }
+}
+
+void FaceRenderer::render(bool fullRedraw) {
+  render(fullRedraw, SignalOverlayState{});
 }
 
 void FaceRenderer::setExpression(FaceExpression expression, bool hold) {
@@ -129,7 +160,8 @@ void FaceRenderer::pickNextExpression(uint32_t nowMs) {
     return;
   }
 
-  const size_t phase = (nowMs / kExpressionHoldMs) % (sizeof(kExpressionCycle) / sizeof(kExpressionCycle[0]));
+  const size_t phase =
+      (nowMs / kExpressionHoldMs) % (sizeof(kExpressionCycle) / sizeof(kExpressionCycle[0]));
   applyExpression(kExpressionCycle[phase]);
   lastExpressionAtMs_ = nowMs;
 }
@@ -142,7 +174,7 @@ void FaceRenderer::updateBlink(uint32_t nowMs) {
 
   if (nextBlinkAtMs_ != 0 && static_cast<int32_t>(nextBlinkAtMs_ - nowMs) <= 0) {
     blinkEndsAtMs_ = nowMs + 140;
-    nextBlinkAtMs_ = nowMs + 1800 + (nowMs % 1700);
+    nextBlinkAtMs_ = nowMs + kBlinkBaseIntervalMs + (nowMs % kBlinkVarianceWindowMs);
     state_.eyeOpen = 0.18f;
     return;
   }
@@ -168,7 +200,8 @@ void FaceRenderer::updateBob(uint32_t nowMs) {
   state_.bobY = static_cast<float>((nowMs / 280U) % 3U) - 1.0f;
 }
 
-void FaceRenderer::drawEye(int16_t centerX, int16_t centerY, int16_t width, int16_t height, bool leftEye) {
+void FaceRenderer::drawEye(int16_t centerX, int16_t centerY, int16_t width, int16_t height,
+                           bool leftEye) {
   eyeCanvas_.fillScreen(kBg);
 
   const int16_t canvasX = centerX - (FaceRenderer::kEyeCanvasW / 2);
@@ -247,8 +280,7 @@ void FaceRenderer::drawLowerFace() {
   lowerCanvas_.fillScreen(kBg);
   const int16_t canvasX = kLowerFaceCenterX - (FaceRenderer::kLowerCanvasW / 2);
   const int16_t canvasY = kLowerFaceCenterY - (FaceRenderer::kLowerCanvasH / 2);
-  const int16_t mouthY =
-      (FaceRenderer::kLowerCanvasH / 2) + static_cast<int16_t>(state_.bobY);
+  const int16_t mouthY = (FaceRenderer::kLowerCanvasH / 2) + static_cast<int16_t>(state_.bobY);
 
   switch (state_.expression) {
     case FaceExpression::Happy:
@@ -275,9 +307,24 @@ void FaceRenderer::drawLowerFace() {
   if (state_.showBlush) {
     const int16_t blushY = 13 + static_cast<int16_t>(state_.bobY);
     lowerCanvas_.fillCircle(16, blushY, kBlushRadius, kAccentPink);
-    lowerCanvas_.fillCircle(FaceRenderer::kLowerCanvasW - 16, blushY, kBlushRadius, kAccentPink);
+    lowerCanvas_.fillCircle(FaceRenderer::kLowerCanvasW - 16, blushY, kBlushRadius,
+                            kAccentPink);
   }
 
   tft_.drawRGBBitmap(canvasX, canvasY, lowerCanvas_.getBuffer(), FaceRenderer::kLowerCanvasW,
                      FaceRenderer::kLowerCanvasH);
+}
+
+void FaceRenderer::drawSignalBadge(const SignalOverlayState& overlay) {
+  tft_.fillRect(kBadgeX, kBadgeY, kBadgeW, kBadgeH, kBg);
+  lastSignalOverlay_ = overlay;
+  signalBadgeDrawn_ = true;
+  if (!overlay.visible) {
+    return;
+  }
+
+  const uint16_t activeColor = activeLampColor(overlay.signal);
+  const int16_t lampX = kBadgeX + (kBadgeW / 2);
+  const int16_t lampY = kBadgeY + (kBadgeH / 2);
+  tft_.fillCircle(lampX, lampY, kLampRadius, activeColor);
 }
