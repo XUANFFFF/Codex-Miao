@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <WiFiUdp.h>
 
+#include "fetch_failure_counter.h"
+
 class BridgeDiscovery {
  public:
   void begin(uint16_t listenPort, const char* expectedService, uint32_t staleAfterMs);
@@ -15,8 +17,6 @@ class BridgeDiscovery {
 
  private:
   static constexpr size_t kMaxServiceNameLength = 96;
-  static constexpr uint32_t kMaxConsecutiveFetchFailures = 3;
-
   void clearRuntimeState();
   bool shouldExpire(uint32_t nowMs) const;
 
@@ -28,7 +28,7 @@ class BridgeDiscovery {
   bool hasLastBeaconAtMs_ = false;
   uint32_t lastFetchFailureAtMs_ = 0;
   uint32_t lastFetchSuccessAtMs_ = 0;
-  uint32_t failureCount_ = 0;
+  FetchFailureCounter fetchFailures_;
   IPAddress endpointIp_;
   bool listening_ = false;
   bool endpointValid_ = false;

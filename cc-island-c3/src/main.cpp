@@ -452,6 +452,12 @@ bool applyJsonPayload(const String& line) {
   }
 
   UsageData nextData = usageData;
+  const bool hasUsagePercentages = doc["window_pct"].is<long>() || doc["week_pct"].is<long>();
+  if (doc["usage_available"].is<bool>()) {
+    nextData.usageAvailable = doc["usage_available"].as<bool>();
+  } else if (hasUsagePercentages) {
+    nextData.usageAvailable = true;
+  }
 
   if (doc["window_pct"].is<long>()) {
     nextData.windowPct = clampPercent(doc["window_pct"].as<long>());
@@ -470,6 +476,7 @@ bool applyJsonPayload(const String& line) {
   }
 
   const bool dataChanged =
+      nextData.usageAvailable != usageData.usageAvailable ||
       nextData.windowPct != usageData.windowPct || nextData.weekPct != usageData.weekPct ||
       nextData.resetMin != usageData.resetMin ||
       !boundedTextEquals(nextData.resetText, usageData.resetText, kResetTextCapacity);

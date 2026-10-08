@@ -9,6 +9,7 @@ import secrets
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -25,14 +26,19 @@ DEFAULT_DISCOVERY_PORT = 8766
 DEFAULT_DISCOVERY_INTERVAL = 2.0
 DEFAULT_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 DEFAULT_MODE_PATH = Path(__file__).with_name("bridge_mode.json")
+DEFAULT_PERMISSION_STATE_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "CodexMiao" / "permission_state.json"
 DEFAULT_SECRETS_PATH = Path(__file__).resolve().parents[1] / "src" / "wifi_secrets.h"
 USAGE_CACHE_TTL_SECONDS = 30
+USAGE_CACHE_RETRY_SECONDS = 30
 DISCOVERY_SERVICE = "codex-miao-bridge"
 DISCOVERY_VERSION = 1
 ACTIVE_SESSION_STALE_SECONDS = 180
 ACTIVE_SIGNAL_HOLD_SECONDS = 180
+ACTIVE_TOOL_CALL_LEASE_SECONDS = 30 * 60
+PERMISSION_PENDING_MAX_AGE_SECONDS = 24 * 60 * 60
 SESSION_TAIL_MAX_LINES = 240
 SESSION_TAIL_READ_BYTES = 262144
+IS_WINDOWS = os.name == "nt"
 BRIDGE_TOKEN_PATTERN = re.compile(
     r'^\s*static\s+constexpr\s+char\s+kBridgeAuthToken\[\]\s*=\s*"([^"]*)"\s*;',
     re.MULTILINE,
@@ -314,6 +320,17 @@ USAGE_UI_HTML = """<!doctype html>
         return;
       }
 
+      if (data.usage_available === false) {
+        els.windowPct.textContent = '--';
+        els.weekPct.textContent = '--';
+        els.windowBar.style.width = '0%';
+        els.weekBar.style.width = '0%';
+        els.resetText.textContent = '--:--';
+        els.resetMinutes.textContent = '';
+        setStatus('桥接已连接，用量暂不可用', 'var(--idle)');
+        return;
+      }
+
       const windowPct = Number(data.window_pct ?? 0);
       const weekPct = Number(data.week_pct ?? 0);
       const resetMin = Number(data.reset_min ?? 0);
@@ -323,7 +340,7 @@ USAGE_UI_HTML = """<!doctype html>
       els.weekBar.style.width = `${Math.max(0, Math.min(100, weekPct))}%`;
       els.resetText.textContent = data.reset_text || '--:--';
       els.resetMinutes.textContent = Number.isFinite(resetMin) ? ` · 还剩 ${resetMin} 分钟` : '';
-      setStatus('桥接已连接', 'var(--ok)');
+      setStatus(data.usage_stale ? '桥接已连接，用量为缓存' : '桥接已连接', 'var(--ok)');
     }
 
     async function loadUsage() {
@@ -376,24 +393,55 @@ def fetch_wham_usage(auth_path: Path) -> dict:
 
 
 class UsageCache:
-    def __init__(self, fetch, ttl_seconds: float = USAGE_CACHE_TTL_SECONDS, clock=time.monotonic):
+    def __init__(
+        self,
+        fetch,
+        ttl_seconds: float = USAGE_CACHE_TTL_SECONDS,
+        retry_seconds: float = USAGE_CACHE_RETRY_SECONDS,
+        clock=time.monotonic,
+    ):
         self._fetch = fetch
         self._ttl_seconds = ttl_seconds
+        self._retry_seconds = retry_seconds
         self._clock = clock
         self._lock = threading.Lock()
         self._payload = None
         self._expires_at = 0.0
+        self._retry_at = 0.0
+        self._refreshing = False
 
     def get(self) -> dict:
+        return self.get_snapshot()[0]
+
+    def get_snapshot(self) -> tuple[dict | None, bool]:
         with self._lock:
             now = self._clock()
-            if self._payload is not None and now < self._expires_at:
-                return self._payload
+            if now >= self._expires_at and now >= self._retry_at and not self._refreshing:
+                self._refreshing = True
+                refresh = threading.Thread(target=self._refresh, daemon=True)
+                try:
+                    refresh.start()
+                except RuntimeError:
+                    self._refreshing = False
+                    self._retry_at = now + self._retry_seconds
 
+            stale = self._payload is not None and now >= self._expires_at
+            return self._payload, stale
+
+    def _refresh(self) -> None:
+        try:
             payload = self._fetch()
+        except Exception:
+            with self._lock:
+                self._retry_at = self._clock() + self._retry_seconds
+                self._refreshing = False
+            return
+
+        with self._lock:
             self._payload = payload
-            self._expires_at = now + self._ttl_seconds
-            return payload
+            self._expires_at = self._clock() + self._ttl_seconds
+            self._retry_at = 0.0
+            self._refreshing = False
 
 
 def read_bridge_token(secrets_path: Path) -> str:
@@ -535,27 +583,188 @@ def read_recent_session_lines(path: Path, max_lines: int = SESSION_TAIL_MAX_LINE
     return lines
 
 
-def find_latest_codex_session_path(sessions_root: Path = DEFAULT_SESSIONS_PATH) -> Path | None:
-    if not sessions_root.is_dir():
-        return None
+def _permission_state_lock(path: Path):
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
 
-    latest_path: Path | None = None
-    latest_mtime = -1.0
+            handle.seek(0)
+            if not handle.read(1):
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        return handle
+    except Exception:
+        handle.close()
+        raise
+
+
+def _unlock_permission_state(handle) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def _replace_with_retry(source: Path, destination: Path) -> None:
+    attempts = 4 if IS_WINDOWS else 1
+    for attempt in range(attempts):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(0.01 * (attempt + 1))
+
+
+def apply_permission_hook_event(
+    event: dict,
+    state_path: Path = DEFAULT_PERMISSION_STATE_PATH,
+    *,
+    clock=time.time,
+) -> None:
+    event_name = str(event.get("hook_event_name") or "")
+    session_id = str(event.get("session_id") or "").strip()
+    turn_id = str(event.get("turn_id") or "").strip()
+    if not session_id:
+        return
+
+    lock_handle = _permission_state_lock(state_path)
+    try:
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            state = {}
+        pending = [item for item in state.get("pending", []) if isinstance(item, dict)]
+
+        if event_name == "PermissionRequest":
+            pending = [
+                item
+                for item in pending
+                if not (item.get("session_id") == session_id and item.get("turn_id") == turn_id)
+            ]
+            pending.append(
+                {
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                    "created_at": clock(),
+                }
+            )
+        elif event_name == "PostToolUse" and turn_id:
+            pending = [
+                item
+                for item in pending
+                if not (item.get("session_id") == session_id and item.get("turn_id") == turn_id)
+            ]
+        elif event_name in {
+            "SessionStart",
+            "SessionEnd",
+            "UserPromptSubmit",
+            "Stop",
+            "Interrupt",
+        }:
+            pending = [item for item in pending if item.get("session_id") != session_id]
+        else:
+            return
+
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=state_path.parent,
+            prefix=state_path.name + ".",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump({"pending": pending}, handle, separators=(",", ":"))
+            temp_path = Path(handle.name)
+        try:
+            _replace_with_retry(temp_path, state_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+    finally:
+        _unlock_permission_state(lock_handle)
+
+
+def has_pending_permission(
+    state_path: Path = DEFAULT_PERMISSION_STATE_PATH,
+    *,
+    now: float | None = None,
+) -> bool:
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+
+    timestamp = time.time() if now is None else now
+    for item in state.get("pending", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            age = timestamp - float(item.get("created_at"))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= age <= PERMISSION_PENDING_MAX_AGE_SECONDS:
+            return True
+    return False
+
+
+def find_codex_session_paths(sessions_root: Path = DEFAULT_SESSIONS_PATH) -> list[Path]:
+    if not sessions_root.is_dir():
+        return []
+
+    minimum_mtime = time.time() - ACTIVE_TOOL_CALL_LEASE_SECONDS
+    candidates: list[tuple[float, Path]] = []
     for path in sessions_root.rglob("*.jsonl"):
         try:
-            stat = path.stat()
+            modified_at = path.stat().st_mtime
         except OSError:
             continue
-        if stat.st_mtime > latest_mtime:
-            latest_path = path
-            latest_mtime = stat.st_mtime
-    return latest_path
+        if modified_at >= minimum_mtime:
+            candidates.append((modified_at, path))
+    candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+    return [path for _, path in candidates]
 
 
-def derive_agent_signal_from_codex_sessions(sessions_root: Path = DEFAULT_SESSIONS_PATH) -> str:
-    session_path = find_latest_codex_session_path(sessions_root)
-    if session_path is None:
+def find_latest_codex_session_path(sessions_root: Path = DEFAULT_SESSIONS_PATH) -> Path | None:
+    paths = find_codex_session_paths(sessions_root)
+    return paths[0] if paths else None
+
+
+def derive_agent_signal_from_codex_sessions(
+    sessions_root: Path = DEFAULT_SESSIONS_PATH,
+    permission_state_path: Path = DEFAULT_PERMISSION_STATE_PATH,
+) -> str:
+    if has_pending_permission(permission_state_path):
+        return "permission"
+
+    session_paths = find_codex_session_paths(sessions_root)
+    if not session_paths:
         return "idle"
+
+    state_priority = {"idle": 0, "blocked": 1, "thinking": 2, "working": 3, "permission": 4}
+    states = (derive_agent_signal_from_session_path(path) for path in session_paths)
+    return max(states, key=lambda state: state_priority.get(state, 0), default="idle")
+
+
+def derive_agent_signal_from_session_path(session_path: Path) -> str:
 
     try:
         session_age_seconds = (datetime.now(timezone.utc).timestamp() - session_path.stat().st_mtime)
@@ -613,11 +822,11 @@ def derive_agent_signal_from_codex_sessions(sessions_root: Path = DEFAULT_SESSIO
     latest_started_or_min = latest_started or min_time
     latest_completed_or_min = latest_completed or min_time
 
-    def is_recent(event_time: datetime | None) -> bool:
+    def is_recent(event_time: datetime | None, max_age: float = ACTIVE_SIGNAL_HOLD_SECONDS) -> bool:
         if event_time is None:
             return False
         age_seconds = (now_utc - event_time).total_seconds()
-        return 0 <= age_seconds <= ACTIVE_SIGNAL_HOLD_SECONDS
+        return 0 <= age_seconds <= max_age
 
     if latest_aborted is not None:
         aborted_time, aborted_reason = latest_aborted
@@ -637,6 +846,7 @@ def derive_agent_signal_from_codex_sessions(sessions_root: Path = DEFAULT_SESSIO
         call_time >= latest_started_or_min
         and call_time > latest_completed_or_min
         and (latest_aborted is None or call_time > latest_aborted[0])
+        and is_recent(call_time, ACTIVE_TOOL_CALL_LEASE_SECONDS)
         for call_time in pending_tool_calls.values()
     )
     if active_tool_call:
@@ -684,7 +894,7 @@ def derive_agent_signal_from_codex_sessions(sessions_root: Path = DEFAULT_SESSIO
     return "thinking" if latest_started is not None and latest_started > latest_completed_or_min else "idle"
 
 
-def build_payload_from_usage(payload: dict) -> dict:
+def build_usage_fields(payload: dict) -> dict:
     rate_limit = payload.get("rate_limit") or {}
     primary = find_window(rate_limit, 18000, "primary_window")
     secondary = find_window(rate_limit, 604800, "secondary_window")
@@ -693,7 +903,15 @@ def build_payload_from_usage(payload: dict) -> dict:
         "week_pct": remaining_percent(secondary.get("used_percent")),
         "reset_min": minutes_until(primary.get("reset_at")),
         "reset_text": format_reset_time(primary.get("reset_at")),
+    }
+
+
+def build_payload_from_usage(payload: dict) -> dict:
+    return {
+        **build_usage_fields(payload),
         "agent_signal": derive_agent_signal_from_codex_sessions(),
+        "usage_available": True,
+        "usage_stale": False,
     }
 
 
@@ -704,8 +922,21 @@ def build_current_payload(auth_path: Path, mode_path: Path, usage_cache: UsageCa
             "bridge_state": "offline",
             "agent_signal": "idle",
         }
-    usage_payload = usage_cache.get() if usage_cache is not None else fetch_wham_usage(auth_path)
-    return build_payload_from_usage(usage_payload)
+
+    result = {
+        "agent_signal": derive_agent_signal_from_codex_sessions(),
+        "usage_available": False,
+        "usage_stale": False,
+    }
+    if usage_cache is None:
+        return result
+
+    usage_payload, usage_stale = usage_cache.get_snapshot()
+    if usage_payload is not None:
+        result.update(build_usage_fields(usage_payload))
+        result["usage_available"] = True
+        result["usage_stale"] = usage_stale
+    return result
 
 
 def read_bridge_mode(mode_path: Path) -> str:
@@ -735,7 +966,36 @@ def is_preferred_lan_ipv4(address: str) -> bool:
     return ip.is_private
 
 
-def choose_discovery_host() -> str:
+def parse_ipconfig_ipv4_interfaces(output: str) -> list[tuple[str, str | None]]:
+    lines = output.splitlines()
+    interfaces: list[tuple[str, str | None]] = []
+    for index, raw_line in enumerate(lines):
+        if re.search(r"\bIPv4\b", raw_line, re.IGNORECASE) is None:
+            continue
+
+        addresses = re.findall(r"(\d+\.\d+\.\d+\.\d+)", raw_line)
+        if not addresses:
+            continue
+        host = addresses[-1]
+        subnet_mask = None
+        for mask_line in lines[index + 1 :]:
+            if re.search(r"\bIPv4\b", mask_line, re.IGNORECASE):
+                break
+            for candidate in re.findall(r"(\d+\.\d+\.\d+\.\d+)", mask_line):
+                try:
+                    network = ipaddress.IPv4Network(f"0.0.0.0/{candidate}", strict=False)
+                except ValueError:
+                    continue
+                if network.prefixlen < 31:
+                    subnet_mask = candidate
+                    break
+            if subnet_mask is not None:
+                break
+        interfaces.append((host, subnet_mask))
+    return interfaces
+
+
+def discover_local_ipv4_addresses() -> list[str]:
     candidates = []
 
     try:
@@ -756,16 +1016,24 @@ def choose_discovery_host() -> str:
             errors="ignore",
             check=False,
         )
-        for line in ipconfig.stdout.splitlines():
-            if "IPv4" not in line:
-                continue
-
-            matches = re.findall(r"(\d+\.\d+\.\d+\.\d+)", line)
-            for match in matches:
-                if match not in candidates:
-                    candidates.append(match)
+        for host, _ in parse_ipconfig_ipv4_interfaces(ipconfig.stdout):
+            if host not in candidates:
+                candidates.append(host)
     except OSError:
         pass
+
+    return candidates
+
+
+def choose_discovery_host(preferred_host: str | None = None) -> str:
+    candidates = discover_local_ipv4_addresses()
+
+    if preferred_host:
+        if not is_preferred_lan_ipv4(preferred_host):
+            raise ValueError("--discovery-host must be a non-loopback private IPv4 address")
+        if preferred_host not in candidates:
+            raise ValueError(f"--discovery-host {preferred_host} is not assigned to a local interface")
+        return preferred_host
 
     for address in candidates:
         if is_preferred_lan_ipv4(address):
@@ -804,36 +1072,15 @@ def compute_directed_broadcast(host: str) -> str | None:
     except OSError:
         return None
 
-    prefix_length = None
-    current_ipv4 = None
-    current_mask = None
-    pending_ipv4 = None
-    for raw_line in ipconfig.stdout.splitlines():
-        line = raw_line.strip()
-        if not line:
+    for interface_host, subnet_mask in parse_ipconfig_ipv4_interfaces(ipconfig.stdout):
+        if interface_host != host or subnet_mask is None:
             continue
-
-        ipv4_matches = re.findall(r"(\d+\.\d+\.\d+\.\d+)", line)
-        if "IPv4" in line and ipv4_matches:
-            pending_ipv4 = ipv4_matches[-1]
-            current_ipv4 = pending_ipv4
-            current_mask = None
-            continue
-
-        if "Subnet Mask" in line and ipv4_matches:
-            current_mask = ipv4_matches[-1]
-            if current_ipv4 == host:
-                break
-
-    if current_ipv4 != host or current_mask is None:
-        return None
-
-    try:
-        network = ipaddress.IPv4Network(f"{host}/{current_mask}", strict=False)
-    except ValueError:
-        return None
-
-    return str(network.broadcast_address)
+        try:
+            network = ipaddress.IPv4Network(f"{host}/{subnet_mask}", strict=False)
+        except ValueError:
+            return None
+        return str(network.broadcast_address)
+    return None
 
 
 def build_discovery_beacon(port: int, host: str, bridge_token: str) -> bytes:
@@ -1003,6 +1250,11 @@ def main() -> None:
         default=DEFAULT_DISCOVERY_INTERVAL,
         help="Seconds between discovery beacons",
     )
+    parser.add_argument(
+        "--discovery-host",
+        default=os.environ.get("CODEX_MIAO_DISCOVERY_HOST"),
+        help="Local private IPv4 address to advertise when multiple network interfaces are present",
+    )
     parser.add_argument("--auth-path", type=Path, default=DEFAULT_AUTH_PATH, help="Path to auth.json")
     parser.add_argument("--mode-path", type=Path, default=DEFAULT_MODE_PATH, help="Path to bridge mode json")
     parser.add_argument(
@@ -1012,7 +1264,10 @@ def main() -> None:
         help="Path to wifi_secrets.h containing kBridgeAuthToken",
     )
     args = parser.parse_args()
-    discovery_host = choose_discovery_host()
+    try:
+        discovery_host = choose_discovery_host(args.discovery_host)
+    except ValueError as exc:
+        parser.error(str(exc))
     bridge_token = read_bridge_token(args.secrets_path)
 
     server = BridgeHTTPServer(

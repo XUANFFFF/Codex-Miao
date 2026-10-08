@@ -136,13 +136,18 @@ void UsageCardRenderer::drawStaticCard() {
 }
 
 void UsageCardRenderer::drawDynamicCard(const UsageData& data) {
-  const uint8_t windowPct = clampPct(data.windowPct);
-  const uint8_t weekPct = clampPct(data.weekPct);
+  const uint8_t windowPct = data.usageAvailable ? clampPct(data.windowPct) : 0;
+  const uint8_t weekPct = data.usageAvailable ? clampPct(data.weekPct) : 0;
   char pctText[5];
   char weekPctText[5];
 
-  snprintf(pctText, sizeof(pctText), "%u%%", static_cast<unsigned>(windowPct));
-  snprintf(weekPctText, sizeof(weekPctText), "%u%%", static_cast<unsigned>(weekPct));
+  if (data.usageAvailable) {
+    snprintf(pctText, sizeof(pctText), "%u%%", static_cast<unsigned>(windowPct));
+    snprintf(weekPctText, sizeof(weekPctText), "%u%%", static_cast<unsigned>(weekPct));
+  } else {
+    snprintf(pctText, sizeof(pctText), "--");
+    snprintf(weekPctText, sizeof(weekPctText), "--");
+  }
 
   drawBoundedText(kPercentBoxX, kCardY + 10, pctText, sizeof(pctText), 5, kFrame, kPercentBoxW,
                   true);
@@ -155,8 +160,8 @@ void UsageCardRenderer::drawDynamicCard(const UsageData& data) {
   drawBoundedText(kWeekPctBoxX + 4, kCardY + 134, weekPctText, sizeof(weekPctText), 2, kFrame,
                   kWeekPctBoxW - 4);
 
-  drawBoundedText(kResetTextX, kResetTextY, data.resetText, kResetTextCapacity, 2, kFrame,
-                  kResetTextW);
+  const char* resetText = data.usageAvailable ? data.resetText : "--:--";
+  drawBoundedText(kResetTextX, kResetTextY, resetText, kResetTextCapacity, 2, kFrame, kResetTextW);
   drawBoundedText(kSyncTextX, kSyncTextY, data.syncText, kSyncTextCapacity, 1, kMuted,
                   kSyncTextW);
 }

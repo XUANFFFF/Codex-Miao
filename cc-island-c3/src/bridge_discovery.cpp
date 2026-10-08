@@ -115,7 +115,7 @@ void BridgeDiscovery::clearRuntimeState() {
   hasLastBeaconAtMs_ = false;
   lastFetchFailureAtMs_ = 0;
   lastFetchSuccessAtMs_ = 0;
-  failureCount_ = 0;
+  fetchFailures_.reset();
   endpointValid_ = false;
 }
 
@@ -220,7 +220,7 @@ bool BridgeDiscovery::update(uint32_t nowMs) {
       endpointPort_ = nextPort;
       lastBeaconAtMs_ = nowMs;
       hasLastBeaconAtMs_ = true;
-      failureCount_ = 0;
+      fetchFailures_.noteEndpointSeen(endpointChanged);
       endpointValid_ = true;
 
       if (endpointChanged) {
@@ -264,11 +264,7 @@ bool BridgeDiscovery::endpointUrl(char* buffer, size_t capacity, const char* pat
 
 void BridgeDiscovery::noteFetchFailure(uint32_t nowMs) {
   lastFetchFailureAtMs_ = nowMs;
-  if (failureCount_ < 0xFFFFFFFFUL) {
-    ++failureCount_;
-  }
-
-  if (failureCount_ >= kMaxConsecutiveFetchFailures) {
+  if (fetchFailures_.noteFailure()) {
     Serial.println("discovery: clearing endpoint after repeated fetch failures");
     clearRuntimeState();
   }
@@ -276,5 +272,5 @@ void BridgeDiscovery::noteFetchFailure(uint32_t nowMs) {
 
 void BridgeDiscovery::noteFetchSuccess(uint32_t nowMs) {
   lastFetchSuccessAtMs_ = nowMs;
-  failureCount_ = 0;
+  fetchFailures_.reset();
 }

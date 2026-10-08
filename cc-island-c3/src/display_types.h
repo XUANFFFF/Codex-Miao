@@ -40,6 +40,7 @@ constexpr size_t kResetTextCapacity = 6;
 constexpr size_t kSyncTextCapacity = 16;
 
 struct UsageData {
+  bool usageAvailable = false;
   uint8_t windowPct = 0;
   uint8_t weekPct = 0;
   uint16_t resetMin = 0;
