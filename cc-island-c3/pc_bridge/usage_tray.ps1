@@ -36,6 +36,72 @@ Write-Log "using python executable: $pythonwExe"
 
 $bridgeHost = "0.0.0.0"
 $bridgePort = 8765
+
+function Get-BridgeDiscoveryDefaults {
+    param(
+        [string]$PythonPath,
+        [string]$BridgeScriptPath
+    )
+
+    if (-not (Test-Path $BridgeScriptPath)) {
+        Write-Log "serve_usage.py not found; discovery defaults will be left to the Python bridge"
+        return $null
+    }
+
+    $probeScript = @'
+import ast
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+tree = ast.parse(path.read_text(encoding="utf-8"))
+values = {}
+for node in tree.body:
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id in ("DEFAULT_DISCOVERY_PORT", "DEFAULT_DISCOVERY_INTERVAL"):
+                values[target.id] = ast.literal_eval(node.value)
+
+print(json.dumps({
+    "port": values["DEFAULT_DISCOVERY_PORT"],
+    "interval": values["DEFAULT_DISCOVERY_INTERVAL"],
+}))
+'@
+
+    try {
+        $probeOutput = & $PythonPath -c $probeScript $BridgeScriptPath 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $probeOutput) {
+            throw "Python probe did not return discovery defaults."
+        }
+
+        $parsedDefaults = $probeOutput | ConvertFrom-Json
+        if ($null -eq $parsedDefaults.port -or $null -eq $parsedDefaults.interval) {
+            throw "Python probe returned incomplete discovery defaults."
+        }
+
+        $port = [int]$parsedDefaults.port
+        $interval = [double]$parsedDefaults.interval
+        $intervalText = $interval.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+        Write-Log "loaded discovery defaults from serve_usage.py: port=$port interval=$intervalText"
+        return @{
+            Port = $port
+            Interval = $interval
+        }
+    } catch {
+        Write-Log ("failed to read discovery defaults from serve_usage.py; discovery args will be omitted so Python uses built-in defaults: {0}" -f $_.Exception.Message)
+    }
+
+    return $null
+}
+
+$bridgeDiscoveryDefaults = Get-BridgeDiscoveryDefaults -PythonPath $pythonExe -BridgeScriptPath $serveScript
+$bridgeDiscoveryArgs = ""
+if ($bridgeDiscoveryDefaults) {
+    $bridgeDiscoveryPort = $bridgeDiscoveryDefaults.Port
+    $bridgeDiscoveryIntervalText = $bridgeDiscoveryDefaults.Interval.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    $bridgeDiscoveryArgs = " --discovery-port $bridgeDiscoveryPort --discovery-interval $bridgeDiscoveryIntervalText"
+}
 $bridgeUrl = "http://127.0.0.1:$bridgePort/usage"
 $bridgeHealthUrl = "http://127.0.0.1:$bridgePort/health"
 $bridgeProcess = $null
@@ -85,7 +151,7 @@ function Start-BridgeProcess {
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $pythonwExe
-    $psi.Arguments = "`"$serveScript`" --host $bridgeHost --port $bridgePort --mode-path `"$bridgeModePath`""
+    $psi.Arguments = "`"$serveScript`" --host $bridgeHost --port $bridgePort$bridgeDiscoveryArgs --mode-path `"$bridgeModePath`""
     $psi.WorkingDirectory = $scriptDir
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true

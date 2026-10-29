@@ -13,6 +13,6 @@ Set shell = CreateObject("WScript.Shell")
 shell.Run "powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File ""$trayScript""", 0, False
 "@
 
-Set-Content -Path $targetVbs -Value $vbsContent -Encoding ASCII
+[System.IO.File]::WriteAllText($targetVbs, $vbsContent, [System.Text.Encoding]::Unicode)
 Write-Output "Installed startup launcher:"
 Write-Output $targetVbs
