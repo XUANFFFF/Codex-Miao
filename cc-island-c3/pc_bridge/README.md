@@ -25,6 +25,21 @@ Invoke-RestMethod 'http://127.0.0.1:8765/usage?format=json' | ConvertTo-Json
 
 更新仓库后，应退出已有托盘，再从当前仓库运行 `usage_tray.ps1`。使用开机启动时重新运行 `install_startup.ps1`，避免启动项仍指向旧副本。健康响应缺少 `protocol_version: 2` 或 `activity` 时，先检查运行进程的脚本路径。
 
+### 登录后自动启动
+
+先结束手动启动的 USB 转发，避免相对路径启动的旧进程占用串口；然后安装串口依赖并注册当前仓库的启动项：
+
+```powershell
+python -m pip install pyserial
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File cc-island-c3\pc_bridge\install_startup.ps1 -UsbPort COM3
+```
+
+下次登录 Windows 时，同一个 `Codex Usage Tray.vbs` 启动项会隐藏启动 Bridge 托盘和 USB 转发。设备暂未连接、Bridge 尚未就绪时，USB 转发会重试。启动项会检查同路径脚本是否已运行，避免重复启动；修改串口或 Python 路径后，应先退出已有转发进程，再重新安装。仅使用 Wi-Fi 时，重新安装并加 `-SkipUsb`。
+
+不用等待重启即可测试：在资源管理器地址栏输入 `shell:startup`，双击 `Codex Usage Tray.vbs`，然后检查 Bridge 健康响应和屏幕是否持续更新。这里的“开机启动”是用户登录后启动，不是登录前的系统服务。
+
+退出托盘只结束它管理的 Bridge；USB 转发独立运行，等待 Bridge 恢复。需要临时停止 USB 时，可在任务管理器的“详细信息”中显示“命令行”列，仅结束指向本仓库 `send_serial.py` 的 Python 进程。停止全部组件时先停 USB，再退出托盘。删除自动启动使用 `uninstall_startup.ps1`；这只移除下一次登录的启动项，不结束当前进程。Python 环境需保持已安装 pyserial。
+
 ## 2. 安装与检查 Hook
 
 在仓库根目录执行，安装、检查和卸载应使用同一个 Python 环境：
