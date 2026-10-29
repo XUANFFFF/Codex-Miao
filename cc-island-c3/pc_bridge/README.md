@@ -86,6 +86,8 @@ python cc-island-c3\pc_bridge\send_serial.py --port COM3
 
 将 `COM3` 替换为设备实际端口。健康查询应返回 `device: codex-miao-c3` 和 `protocol_version: 2`；只有 `OK` 而没有健康 JSON，不能确认固件版本或新版协议已经运行。串口监视器、烧录器和 USB 转发器不能同时占用同一端口。
 
+固件在 USB 初始化前分配 2,050 字节的接收队列，以容纳最大 1,024 字节状态行及换行。Arduino HWCDC 默认队列只有 256 字节；旧版固件可能表现为短健康查询正常、完整状态同步超时或 `ERR`，此时需要更新固件。
+
 验收步骤：
 
 1. 工作和待授权时，核对 Bridge、USB 与屏幕显示一致。

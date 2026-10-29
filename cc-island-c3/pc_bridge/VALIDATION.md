@@ -9,11 +9,13 @@
 | Bridge 运行路径 | 原托盘及开机启动项指向 `C:\tmp\esp32-ascii` 旧副本；已备份启动项，并切换到当前仓库 |
 | 本机 HTTP | `/health` 返回 `ok: true`、`protocol_version: 2`、`activity.monitor_ok: true`、`last_error: ""`；正在执行的任务识别为 `working` |
 | Hook 部署 | 8 个事件均已注册，脚本和 Python 存在；用户确认已经审核并信任 |
-| Hook 真实回调 | 检查时 `last_recorded_event: null`；尚未证实当前桌面会话已加载 Hook。需在新本地会话中执行 README 的授权卡验收 |
-| ESP32 本地编译 | PlatformIO 6.2.0 / espressif32 7.0.1 / Arduino 2.0.17；ESP32-C3 编译成功。RAM 41,148/327,680；应用 Flash 945,530/1,310,720 字节 |
-| 串口 | COM3，Espressif USB VID 303A / PID 1001；健康查询得到 `OK`，未收到协议 2 的健康 JSON。新版固件是否已运行尚未确认 |
-| 刷写 | 此记录创建时未执行固件刷写；未进行全 Flash 转储 |
-| 实机状态切换 | 原生授权待决、批准、拒绝、取消及屏幕 `NEED OK` 尚无完整联调证据 |
+| Hook 真实回调 | 用户在新 CLI 会话完成测试；随后在本桌面会话收到真实 `PreToolUse` / `PermissionRequest`，带调用 ID 的待处理请求出现，对应工具完成后检查待处理数恢复为 0；Bridge 实际返回 `permission` |
+| ESP32 本地编译 | PlatformIO 6.2.0 / espressif32 7.0.1 / Arduino 2.0.17；ESP32-C3 编译成功。RAM 41,148/327,680；应用 Flash 945,546/1,310,720 字节 |
+| 串口 | COM3，Espressif USB VID 303A / PID 1001；新版健康 JSON 返回 `device: codex-miao-c3`、`protocol_version: 2`、`has_status: true` |
+| 刷写 | 用户明确授权后，仅刷写应用分区 `0x10000`，镜像写入后哈希校验通过；未改写分区表、启动加载器或 NVS，未进行全 Flash 转储 |
+| USB 接收修复 | 约 349 字节真实状态整包发送失败，同内容分成 32 字节慢发成功；Arduino HWCDC 默认 RX 队列仅 256 字节。初始化前扩大到 2,050 字节后，整包及最大 1,024 字节状态行（另加换行）均返回 `OK` |
+| 软件重连 | 5 次串口关闭、重开并发送真实状态均返回 `OK`，每次健康查询均确认已收到状态；这不是物理拔插测试 |
+| 实机状态切换 | 用户确认屏幕显示正常，见到 `NEED OK` 提示及后续工作状态切换；人工拒绝、取消和真实并行审批仍待逐项验收 |
 | 物理重连与 Wi-Fi | 拔插 USB、Wi-Fi 断线和恢复尚未验收 |
 
 Python 回归覆盖并行授权、无关工具完成、同输入歧义、重复结果、旧轮次事件、子代理隔离、压缩会话以及历史缓存清理。这些是合成事件测试，不能替代真实授权卡与屏幕观察。固件原生逻辑测试由 PR 的 CI 单独验证。

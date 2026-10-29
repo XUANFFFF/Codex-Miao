@@ -710,6 +710,9 @@ void fetchFromBridge(uint32_t nowMs) {
 }  // namespace
 
 void setup() {
+  // HWCDC defaults to 256 bytes; a full status line can arrive while drawing
+  // or fetching HTTP. Keep room for the maximum line plus queued diagnostics.
+  Serial.setRxBufferSize(2 * (kSerialBufferLimit + 1));
   Serial.begin(115200);
   delay(800);
 
