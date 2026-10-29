@@ -7,21 +7,14 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from serve_usage import DEFAULT_PERMISSION_STATE_PATH
+from permission_state import HOOK_EVENTS, read_pending
 
 
 HOOK_SCRIPT = Path(__file__).with_name("permission_request_hook.py")
-HOOK_EVENTS = (
-    "PermissionRequest",
-    "PostToolUse",
-    "Stop",
-    "Interrupt",
-    "UserPromptSubmit",
-    "SessionStart",
-    "SessionEnd",
-)
 
 
 def hook_command(state_path: Path = DEFAULT_PERMISSION_STATE_PATH) -> str:
@@ -128,6 +121,29 @@ def remove_hooks(hooks_path: Path, state_path: Path = DEFAULT_PERMISSION_STATE_P
     return removed
 
 
+def check_hooks(hooks_path: Path, state_path: Path = DEFAULT_PERMISSION_STATE_PATH) -> dict:
+    config = load_hooks_file(hooks_path)
+    command = hook_command(state_path)
+    installed = []
+    for name in HOOK_EVENTS:
+        groups = config["hooks"].get(name, [])
+        for group in groups if isinstance(groups, list) else []:
+            handlers = group.get("hooks", []) if isinstance(group, dict) else []
+            if any(isinstance(item, dict) and item.get("type") == "command"
+                   and item.get("command") == command for item in (handlers if isinstance(handlers, list) else [])):
+                installed.append(name)
+                break
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    return {"installed_events": installed, "missing_events": [name for name in HOOK_EVENTS if name not in installed],
+            "script_exists": HOOK_SCRIPT.is_file(), "python_exists": Path(sys.executable).is_file(),
+            "state_path": str(state_path), "pending_requests": len(read_pending(state_path, time.time())),
+            "last_recorded_event": state.get("last_event") if isinstance(state, dict) else None,
+            "trust": "not inspected; review the hooks in Codex /hooks"}
+
+
 def default_hooks_path() -> Path:
     profile = Path(os.environ.get("USERPROFILE", str(Path.home())))
     return profile / ".codex" / "hooks.json"
@@ -137,11 +153,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hooks-path", type=Path, default=default_hooks_path())
     parser.add_argument("--state-path", type=Path, default=DEFAULT_PERMISSION_STATE_PATH)
-    parser.add_argument("--remove", action="store_true", help="Remove this bridge's hook entries")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--remove", action="store_true", help="Remove this bridge's hook entries")
+    actions.add_argument("--check", action="store_true", help="Read registration and callback metadata without changing files")
     args = parser.parse_args()
 
     try:
-        if args.remove:
+        if args.check:
+            report = check_hooks(args.hooks_path, args.state_path)
+            print(json.dumps(report, ensure_ascii=True, indent=2))
+            return 0 if not report["missing_events"] and report["script_exists"] and report["python_exists"] else 1
+        elif args.remove:
             count = remove_hooks(args.hooks_path, args.state_path)
             print(f"Removed {count} Codex Miao hook entries.")
         else:

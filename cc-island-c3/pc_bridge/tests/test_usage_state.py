@@ -201,15 +201,21 @@ class UsageStateTests(unittest.TestCase):
     def test_permission_hook_tracks_pending_then_approved_tool_completion(self):
         directory = self.temporary_directory()
         state_path = directory / "permission.json"
+        event = {"session_id": "s1", "turn_id": "t1", "tool_name": "Bash",
+                 "tool_input": {"command": "echo approved"}}
         apply_permission_hook_event(
-            {"hook_event_name": "PermissionRequest", "session_id": "s1", "turn_id": "t1"},
+            {**event, "hook_event_name": "PreToolUse", "tool_use_id": "call-1"},
+            state_path, clock=lambda: 99,
+        )
+        apply_permission_hook_event(
+            {**event, "hook_event_name": "PermissionRequest"},
             state_path,
             clock=lambda: 100,
         )
         self.assertTrue(has_pending_permission(state_path, now=101))
 
         apply_permission_hook_event(
-            {"hook_event_name": "PostToolUse", "session_id": "s1", "turn_id": "t1"},
+            {**event, "hook_event_name": "PostToolUse", "tool_use_id": "call-1"},
             state_path,
             clock=lambda: 102,
         )
@@ -218,17 +224,23 @@ class UsageStateTests(unittest.TestCase):
     def test_permission_hook_clears_pending_after_denied_tool_result(self):
         directory = self.temporary_directory()
         state_path = directory / "permission.json"
+        event = {"session_id": "s1", "turn_id": "t1", "tool_name": "Bash",
+                 "tool_input": {"command": "echo denied"}}
         apply_permission_hook_event(
-            {"hook_event_name": "PermissionRequest", "session_id": "s1", "turn_id": "t1"},
+            {**event, "hook_event_name": "PreToolUse", "tool_use_id": "call-2"},
+            state_path, clock=lambda: 99,
+        )
+        apply_permission_hook_event(
+            {**event, "hook_event_name": "PermissionRequest"},
             state_path,
             clock=lambda: 100,
         )
 
         apply_permission_hook_event(
             {
+                **event,
                 "hook_event_name": "PostToolUse",
-                "session_id": "s1",
-                "turn_id": "t1",
+                "tool_use_id": "call-2",
                 "tool_response": "Permission denied by user",
             },
             state_path,

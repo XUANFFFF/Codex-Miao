@@ -5,15 +5,21 @@ import re
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
+
+from permission_state import read_pending
 
 ACTIVE = {"thinking", "working", "permission"}
 PRIORITY = ("permission", "working", "thinking", "blocked", "unknown", "done", "idle")
 TAIL_BYTES = 256 * 1024
 READ_BYTES = 256 * 1024
 MAX_LINE_BYTES = 256 * 1024
+IDLE_RETENTION_SECONDS = 15 * 60
+MAX_IDLE_SESSIONS = 64
+MAX_RETIRED_FILES = 512
 
 
 def event_time(record, fallback):
@@ -55,13 +61,17 @@ class Session:
     path: Path
     identity: tuple
     session_id: str
+    file_signature: tuple = ()
+    last_read_at: float = 0
+    replay_before: float = 0
     offset: int = 0
     partial: bytes = b""
     discard_line: bool = False
     state: str = "unknown"
     turn_id: str = ""
     updated_at: float = 0
-    resolved_at: float = 0
+    terminal_at: float = 0
+    terminal_turn_id: str = ""
     terminal_until: float = 0
     missing_since: float | None = None
     internal: bool = False
@@ -114,7 +124,8 @@ class Session:
             self.pending.clear()
             self.jobs.clear()
             self.calls.clear()
-            self.resolved_at = timestamp
+            self.terminal_at = timestamp
+            self.terminal_turn_id = turn_id or self.turn_id
             if kind == "turn_aborted":
                 interrupted = payload.get("reason") in {"interrupted", "cancelled", "canceled", "aborted_by_user"}
                 self.state = "blocked" if live and was_active and not interrupted else "idle"
@@ -147,7 +158,6 @@ class Session:
             if finished:
                 self.jobs.difference_update(references)
             self.jobs.update(jobs)
-            self.resolved_at = timestamp
             # A tool can yield a running subprocess. The turn remains active
             # until task_complete/turn_aborted, even while no log is appended.
             if self.state in ACTIVE:
@@ -177,6 +187,7 @@ class SessionActivityMonitor:
         self.updated_at = 0
         self._fingerprint = None
         self._sessions = {}
+        self._retired = OrderedDict()
         self._published = {}
         self._discovered_at = None
         self._scanned_at = None
@@ -224,12 +235,42 @@ class SessionActivityMonitor:
                 record = json.loads(line)
             except (ValueError, UnicodeError):
                 continue
-            live = not self._first_scan and event_time(record, wall_now) >= self.started_wall
+            timestamp = event_time(record, wall_now)
+            live = not self._first_scan and timestamp >= self.started_wall and timestamp > entry.replay_before
             entry.apply(record, now, wall_now, live)
         if len(entry.partial) > MAX_LINE_BYTES:
             entry.partial = b""
             entry.discard_line = True
         entry.missing_since = None
+        if data:
+            entry.last_read_at = now
+
+    @staticmethod
+    def _file_signature(stat):
+        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+    def _prune(self, now, wall_now):
+        waiting = {item["session_id"] for item in read_pending(self.permission_path, wall_now)}
+        inactive = []
+        for path, entry in self._sessions.items():
+            if not entry.internal and (entry.state in ACTIVE or entry.pending or entry.jobs
+                                       or entry.session_id in waiting):
+                continue
+            if entry.file_signature and entry.offset < entry.file_signature[2]:
+                continue
+            state = entry.visible_state(now)
+            if not entry.internal and (state not in {"idle", "unknown"} or (state == "unknown" and entry.turn_id)):
+                continue
+            inactive.append((entry.last_read_at, str(path), path))
+        inactive.sort(reverse=True)
+        for index, (last_read, _, path) in enumerate(inactive):
+            if index < MAX_IDLE_SESSIONS and now - last_read < IDLE_RETENTION_SECONDS:
+                continue
+            entry = self._sessions.pop(path)
+            self._retired[path] = (entry.file_signature, entry.updated_at)
+            self._retired.move_to_end(path)
+        while len(self._retired) > MAX_RETIRED_FILES:
+            self._retired.popitem(last=False)
 
     def scan(self):
         with self._scan_lock:
@@ -242,7 +283,11 @@ class SessionActivityMonitor:
                     recent = []
                     for path in self.root.rglob("*.jsonl"):
                         try:
-                            recent.append((path.stat().st_mtime, str(path), path))
+                            stat = path.stat()
+                            retired = self._retired.get(path)
+                            if retired and retired[0] == self._file_signature(stat):
+                                continue
+                            recent.append((stat.st_mtime, str(path), path))
                         except OSError:
                             continue
                     paths.update(item[2] for item in sorted(recent, reverse=True)[:256])
@@ -254,7 +299,9 @@ class SessionActivityMonitor:
                         identity = (stat.st_dev, stat.st_ino)
                         if entry is None or entry.identity != identity or stat.st_size < entry.offset:
                             offset = max(0, stat.st_size - TAIL_BYTES)
-                            entry = Session(path, identity, path.stem, offset=offset, discard_line=offset > 0)
+                            retired = self._retired.pop(path, None)
+                            entry = Session(path, identity, path.stem, offset=offset, discard_line=offset > 0,
+                                            last_read_at=now, replay_before=retired[1] if retired else 0)
                             self._sessions[path] = entry
                             if offset:
                                 with path.open("rb") as header:
@@ -264,6 +311,7 @@ class SessionActivityMonitor:
                                             entry.apply(metadata, now, wall_now, False)
                                     except (ValueError, UnicodeError, AttributeError):
                                         pass
+                        entry.file_signature = self._file_signature(stat)
                         if stat.st_size > entry.offset:
                             self._read(entry, stat, now, wall_now)
                             if self._first_scan and wall_now - entry.updated_at > 1800 and entry.state in ACTIVE:
@@ -276,6 +324,7 @@ class SessionActivityMonitor:
                 scan_ok, last_error = True, ""
             except OSError as exc:
                 scan_ok, last_error = False, type(exc).__name__
+            self._prune(now, wall_now)
             with self._lock:
                 self._published = {path: replace(entry) for path, entry in self._sessions.items()}
                 self._scanned_at = now
@@ -284,24 +333,14 @@ class SessionActivityMonitor:
             self._first_scan = False
 
     def _permissions(self, entries):
-        try:
-            data = json.loads(self.permission_path.read_text(encoding="utf-8"))
-            pending = data.get("pending", []) if isinstance(data, dict) else []
-        except (OSError, ValueError):
-            return set()
         ids = set()
-        for item in pending if isinstance(pending, list) else []:
-            if not isinstance(item, dict) or not item.get("session_id"):
-                continue
-            try:
-                created = float(item["created_at"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if not 0 <= self.wall_clock() - created <= 86400:
-                continue
+        for item in read_pending(self.permission_path, self.wall_clock()):
+            created = float(item["created_at"])
             session_id = str(item["session_id"])
             entry = entries.get(session_id)
-            if entry and (entry.internal or entry.resolved_at >= created):
+            if entry and (entry.internal or (
+                entry.terminal_at >= created and entry.terminal_turn_id == str(item.get("turn_id") or "")
+            )):
                 continue
             ids.add(session_id)
         return ids

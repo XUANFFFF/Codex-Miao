@@ -168,6 +168,19 @@ class SessionActivityTests(unittest.TestCase):
         self.assertFalse(result["usage_available"])
         self.assertNotIn("private prompt", json.dumps(self.monitor.snapshot(diagnostics=True)))
 
+    def test_unrelated_tool_output_does_not_resolve_permission(self):
+        (self.root / "a.jsonl").write_text(json.dumps({"type": "session_meta", "payload": {"id": "s1"}}) + "\n")
+        self.append("a.jsonl", "task_started", turn_id="t1")
+        self.append("a.jsonl", "function_call", call_id="tool-b")
+        self.scan()
+        self.now += 1
+        self.monitor.permission_path.write_text(json.dumps({"pending": [{"session_id": "s1", "turn_id": "t1", "created_at": self.now}]}))
+        self.now += 1
+        self.append("a.jsonl", "function_call_output", call_id="tool-b", output="finished")
+        result = self.scan()
+        self.assertEqual("permission", result["agent_signal"])
+        self.assertEqual(1, result["permission_sessions"])
+
     def test_slow_filesystem_scan_does_not_block_snapshot_watchdog(self):
         from unittest.mock import patch
         self.append("a.jsonl", "task_started")
@@ -240,6 +253,54 @@ class SessionActivityTests(unittest.TestCase):
         self.scan()
         sessions = self.monitor.snapshot(diagnostics=True)["sessions"]
         self.assertEqual("original-session", sessions[0]["id"])
+
+    def test_idle_history_expires_while_old_running_tool_is_kept(self):
+        self.append("running.jsonl", "function_call", call_id="long-job")
+        self.append("finished.jsonl", "task_started", turn_id="t1")
+        self.scan()
+        self.now += 1
+        self.append("finished.jsonl", "task_complete", turn_id="t1")
+        self.scan()
+        self.now += 901
+        result = self.scan()
+        self.assertEqual("working", result["agent_signal"])
+        self.assertEqual(1, len(self.monitor._sessions))
+        self.assertEqual(1, self.monitor.snapshot(diagnostics=True)["tracked_files"])
+        self.scan()
+        self.assertEqual(1, len(self.monitor._sessions), "discovery re-added unchanged idle history")
+
+    def test_evicted_session_is_restored_when_log_changes(self):
+        self.append("a.jsonl", "task_started", turn_id="t1")
+        self.scan()
+        self.now += 1
+        self.append("a.jsonl", "task_complete", turn_id="t1")
+        self.scan()
+        self.now += 901
+        self.scan()
+        self.assertEqual(0, len(self.monitor._sessions))
+        self.append("a.jsonl", "token_count")
+        self.assertEqual("idle", self.scan()["agent_signal"], "old completion was replayed")
+        self.append("a.jsonl", "task_started", turn_id="t2")
+        self.assertEqual("thinking", self.scan()["agent_signal"])
+
+    def test_idle_cache_has_a_size_limit_before_retention_expires(self):
+        for index in range(75):
+            self.append(f"history-{index}.jsonl", "task_complete")
+        self.scan()
+        self.assertLessEqual(len(self.monitor._sessions), 64)
+        for _ in range(3):
+            self.scan()
+        self.assertLessEqual(len(self.monitor._sessions), 64)
+
+    def test_idle_session_with_pending_approval_is_not_evicted(self):
+        (self.root / "a.jsonl").write_text(json.dumps({"type": "session_meta", "payload": {"id": "s1"}}) + "\n")
+        self.append("a.jsonl", "task_complete", turn_id="t1")
+        self.scan()
+        self.now += 1
+        self.monitor.permission_path.write_text(json.dumps({"pending": [{"session_id": "s1", "turn_id": "t2", "created_at": self.now}]}))
+        self.now += 901
+        self.assertEqual("permission", self.scan()["agent_signal"])
+        self.assertEqual(1, len(self.monitor._sessions))
 
 
 if __name__ == "__main__":

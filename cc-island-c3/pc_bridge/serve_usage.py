@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlparse
 
 from session_activity import SessionActivityMonitor
+from permission_state import HOOK_EVENTS, read_pending, update_permission_state
 
 
 DEFAULT_CODEX_HOME = Path(os.environ.get("USERPROFILE", "")) / ".codex"
@@ -37,7 +38,6 @@ DISCOVERY_VERSION = 1
 ACTIVE_SESSION_STALE_SECONDS = 180
 ACTIVE_SIGNAL_HOLD_SECONDS = 180
 ACTIVE_TOOL_CALL_LEASE_SECONDS = 30 * 60
-PERMISSION_PENDING_MAX_AGE_SECONDS = 24 * 60 * 60
 SESSION_TAIL_MAX_LINES = 240
 SESSION_TAIL_READ_BYTES = 262144
 IS_WINDOWS = os.name == "nt"
@@ -653,8 +653,9 @@ def apply_permission_hook_event(
 ) -> None:
     event_name = str(event.get("hook_event_name") or "")
     session_id = str(event.get("session_id") or "").strip()
-    turn_id = str(event.get("turn_id") or "").strip()
     if not session_id:
+        return
+    if event_name not in HOOK_EVENTS:
         return
 
     lock_handle = _permission_state_lock(state_path)
@@ -663,37 +664,7 @@ def apply_permission_hook_event(
             state = json.loads(state_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             state = {}
-        pending = [item for item in state.get("pending", []) if isinstance(item, dict)]
-
-        if event_name == "PermissionRequest":
-            pending = [
-                item
-                for item in pending
-                if not (item.get("session_id") == session_id and item.get("turn_id") == turn_id)
-            ]
-            pending.append(
-                {
-                    "session_id": session_id,
-                    "turn_id": turn_id,
-                    "created_at": clock(),
-                }
-            )
-        elif event_name == "PostToolUse" and turn_id:
-            pending = [
-                item
-                for item in pending
-                if not (item.get("session_id") == session_id and item.get("turn_id") == turn_id)
-            ]
-        elif event_name in {
-            "SessionStart",
-            "SessionEnd",
-            "UserPromptSubmit",
-            "Stop",
-            "Interrupt",
-        }:
-            pending = [item for item in pending if item.get("session_id") != session_id]
-        else:
-            return
+        state = update_permission_state(state, event, clock())
 
         state_path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
@@ -704,7 +675,7 @@ def apply_permission_hook_event(
             suffix=".tmp",
             delete=False,
         ) as handle:
-            json.dump({"pending": pending}, handle, separators=(",", ":"))
+            json.dump(state, handle, separators=(",", ":"))
             temp_path = Path(handle.name)
         try:
             _replace_with_retry(temp_path, state_path)
@@ -719,22 +690,8 @@ def has_pending_permission(
     *,
     now: float | None = None,
 ) -> bool:
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-
     timestamp = time.time() if now is None else now
-    for item in state.get("pending", []):
-        if not isinstance(item, dict):
-            continue
-        try:
-            age = timestamp - float(item.get("created_at"))
-        except (TypeError, ValueError):
-            continue
-        if 0 <= age <= PERMISSION_PENDING_MAX_AGE_SECONDS:
-            return True
-    return False
+    return bool(read_pending(state_path, timestamp))
 
 
 def find_codex_session_paths(sessions_root: Path = DEFAULT_SESSIONS_PATH) -> list[Path]:
