@@ -62,7 +62,10 @@ bool signalOverlayStatesEqual(const SignalOverlayState& left, const SignalOverla
 uint16_t activeLampColor(AgentSignalState signal) {
   switch (signal) {
     case AgentSignalState::Idle:
+    case AgentSignalState::Done:
       return kBadgeLampGreen;
+    case AgentSignalState::Unknown:
+      return 0x8410;
     case AgentSignalState::Thinking:
     case AgentSignalState::Working:
       return kBadgeLampYellow;

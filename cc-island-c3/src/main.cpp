@@ -14,6 +14,7 @@
 #include "face_renderer.h"
 #include "screen_mode_controller.h"
 #include "signal_page_renderer.h"
+#include "status_order.h"
 #include "usage_card_renderer.h"
 #include "usage_state_tracker.h"
 #include "wifi_config.h"
@@ -31,7 +32,7 @@ constexpr int kTftSclk = 4;
 constexpr int kTftMosi = 6;
 constexpr int16_t kScreenWidth = 240;
 constexpr int16_t kScreenHeight = 240;
-constexpr size_t kSerialBufferLimit = 384;
+constexpr size_t kSerialBufferLimit = 1024;
 constexpr size_t kJsonDocCapacity = 384;
 constexpr uint8_t kTransitionStepsPerHalf = 8;
 constexpr uint8_t kTransitionPhaseCount = kTransitionStepsPerHalf * 2;
@@ -68,6 +69,15 @@ unsigned long nextFetchAllowedAt = 0;
 unsigned long lastWifiAttemptAt = 0;
 int wifiIndex = 0;
 bool wifiWasConnected = false;
+StatusOrder statusOrder;
+uint32_t lastStatusAtMs = 0;
+uint32_t lastSerialStatusAtMs = 0;
+bool hasStatus = false;
+uint32_t statusReceiptCount = 0;
+bool hasSerialStatus = false;
+uint8_t activeSessionCount = 0;
+uint8_t permissionSessionCount = 0;
+uint8_t completedSessionCount = 0;
 
 bool makeBridgeRequestSignature(const char* requestTarget, const char* nonce, char* signature,
                                 size_t capacity) {
@@ -194,6 +204,14 @@ bool parseAgentSignal(const JsonDocument& doc, AgentSignalState& signal) {
     signal = AgentSignalState::Blocked;
     return true;
   }
+  if (strcmp(value, "done") == 0) {
+    signal = AgentSignalState::Done;
+    return true;
+  }
+  if (strcmp(value, "unknown") == 0) {
+    signal = AgentSignalState::Unknown;
+    return true;
+  }
 
   return false;
 }
@@ -209,6 +227,7 @@ void updateSignalState(AgentSignalState nextSignal, uint32_t nowMs) {
 
   signalOverlayState.signal = nextSignal;
   signalOverlayState.visible = true;
+  if (nextSignal == AgentSignalState::Done) faceRenderer.setExpression(FaceExpression::Happy);
 
   if (isRed) {
     signalPageState.kind = signalPageKindFor(nextSignal);
@@ -254,11 +273,8 @@ ScreenMode desiredContentMode(uint32_t nowMs) {
 }
 
 SignalOverlayState overlayForMode(ScreenMode mode) {
-  SignalOverlayState overlay;
-  overlay.visible = true;
-  overlay.signal = mode == ScreenMode::UsageCard ? AgentSignalState::Working
-                                                 : AgentSignalState::Idle;
-  return overlay;
+  (void)mode;
+  return signalOverlayState;
 }
 
 void renderMode(ScreenMode mode, bool fullRedraw, const SignalOverlayState& overlay) {
@@ -267,6 +283,18 @@ void renderMode(ScreenMode mode, bool fullRedraw, const SignalOverlayState& over
   } else {
     faceRenderer.render(fullRedraw, overlay);
   }
+  tft.fillRect(4, 220, 170, 12, ST77XX_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  tft.setCursor(4, 222);
+  char summary[40];
+  if (overlay.signal == AgentSignalState::Unknown) {
+    snprintf(summary, sizeof(summary), "STATUS UNKNOWN");
+  } else {
+    snprintf(summary, sizeof(summary), "W:%u OK?:%u DONE:%u", activeSessionCount,
+             permissionSessionCount, completedSessionCount);
+  }
+  tft.print(summary);
 }
 
 int16_t computeCoverWidth(uint8_t progress) {
@@ -307,7 +335,8 @@ void drawTransitionCover(TransitionDirection direction, uint8_t phase) {
 void resetFaceToIdle() {
   faceRenderer.clearExpressionHold();
   faceRenderer.setAutoCycleEnabled(true);
-  faceRenderer.setExpression(FaceExpression::Neutral);
+  faceRenderer.setExpression(signalOverlayState.signal == AgentSignalState::Done
+                                ? FaceExpression::Happy : FaceExpression::Neutral);
 }
 
 void updateDisplay() {
@@ -404,8 +433,9 @@ void updateDisplay() {
         renderMode(currentMode, fullRedraw || modeChanged, overlayForMode(currentMode));
         usageCardDirty = false;
       }
-    } else if (fullRedraw || modeChanged || faceChanged) {
+    } else if (fullRedraw || modeChanged || faceChanged || usageCardDirty) {
       renderMode(currentMode, fullRedraw || modeChanged, overlayForMode(currentMode));
+      usageCardDirty = false;
     }
 
     lastRenderedMode = currentMode;
@@ -429,10 +459,42 @@ bool applyJsonPayload(const String& line) {
   if (err) {
     return false;
   }
+  if (!doc.is<JsonObject>()) return false;
+
+  if (doc["command"] == "health") {
+    Serial.printf("{\"device\":\"codex-miao-c3\",\"protocol_version\":2,\"has_status\":%s,\"status_age_ms\":%lu,\"free_heap\":%lu}\n",
+                  hasStatus ? "true" : "false",
+                  static_cast<unsigned long>(millis() - lastStatusAtMs),
+                  static_cast<unsigned long>(ESP.getFreeHeap()));
+    return true;
+  }
+  const bool ordered = doc["status_stream"].is<const char*>() && doc["status_revision"].is<uint64_t>();
+  AgentSignalState validSignal;
+  const bool validStatus = parseAgentSignal(doc, validSignal);
+  if ((ordered && !validStatus) || (!validStatus && !doc["window_pct"].is<long>() &&
+                                   !doc["week_pct"].is<long>())) return false;
+  if (ordered) {
+    if (!statusOrder.accept(doc["status_stream"].as<const char*>(), doc["status_revision"].as<uint64_t>())) {
+      return true;  // Acknowledge duplicate transport work without applying old data.
+    }
+  } else if (statusOrder.initialized()) {
+    return true;
+  }
 
   const char* displayMode = doc["display_mode"] | "";
   const char* bridgeState = doc["bridge_state"] | "";
   const uint32_t nowMs = millis();
+  hasStatus = true;
+  ++statusReceiptCount;
+  lastStatusAtMs = nowMs;
+  const uint8_t nextActive = clampPercent(doc["active_sessions"] | 0L);
+  const uint8_t nextPermission = clampPercent(doc["permission_sessions"] | 0L);
+  const uint8_t nextCompleted = clampPercent(doc["completed_sessions"] | 0L);
+  if (nextActive != activeSessionCount || nextPermission != permissionSessionCount ||
+      nextCompleted != completedSessionCount) usageCardDirty = true;
+  activeSessionCount = nextActive;
+  permissionSessionCount = nextPermission;
+  completedSessionCount = nextCompleted;
 
   const AgentSignalState previousSignal = signalOverlayState.signal;
   AgentSignalState parsedSignal = signalOverlayState.signal;
@@ -510,7 +572,12 @@ void handleSerialInput() {
   while (Serial.available()) {
     char ch = static_cast<char>(Serial.read());
     if (ch == '\n') {
+      const uint32_t previousReceipt = statusReceiptCount;
       if (!serialLineOverflowed && applyJsonPayload(serialBuffer)) {
+        if (statusReceiptCount != previousReceipt) {
+          hasSerialStatus = true;
+          lastSerialStatusAtMs = millis();
+        }
         setSyncText("serial");
         Serial.println("OK");
       } else {
@@ -556,6 +623,7 @@ void ensureWifiConnected() {
 }
 
 void fetchFromBridge(uint32_t nowMs) {
+  if (hasSerialStatus && nowMs - lastSerialStatusAtMs < 10000) return;
   if (WiFi.status() != WL_CONNECTED) {
     return;
   }
@@ -658,6 +726,7 @@ void setup() {
   tft.setRotation(2);
 
   faceRenderer.begin();
+  updateSignalState(AgentSignalState::Unknown, millis());
   WiFi.mode(WIFI_STA);
   bridgeDiscovery.begin(kBridgeDiscoveryPort, kBridgeDiscoveryService, kBridgeDiscoveryStaleMs);
   updateDisplay();
@@ -666,6 +735,7 @@ void setup() {
 
 void loop() {
   handleSerialInput();
+  const bool serialFresh = hasSerialStatus && millis() - lastSerialStatusAtMs < 10000;
   ensureWifiConnected();
 
   bool wifiConnected = WiFi.status() == WL_CONNECTED;
@@ -680,9 +750,11 @@ void loop() {
     nextFetchAllowedAt = 0;
     bridgeDiscovery.reset();
     endpointWasAvailable = false;
-    updateSignalState(AgentSignalState::Idle, millis());
-    clearSignalPage();
-    usageStateTracker.forceIdle();
+    if (!serialFresh) {
+      updateSignalState(AgentSignalState::Unknown, millis());
+      clearSignalPage();
+      usageStateTracker.forceIdle();
+    }
     Serial.println("wifi: disconnected");
     setSyncText("");
   }
@@ -705,20 +777,24 @@ void loop() {
         Serial.println("discovery: waiting for beacon");
       }
     }
-    if (!hasEndpoint) {
+    if (!hasEndpoint && !serialFresh) {
       if (nextFetchAllowedAt != 0) {
         nextFetchAllowedAt = 0;
         setSyncText("");
       }
-      updateSignalState(AgentSignalState::Idle, nowMs);
+      updateSignalState(AgentSignalState::Unknown, nowMs);
       clearSignalPage();
       usageStateTracker.forceIdle();
       updateDisplay();
-      delay(25);
-      return;
     }
 
     fetchFromBridge(nowMs);
+  }
+
+  if (hasStatus && millis() - lastStatusAtMs > 15000) {
+    updateSignalState(AgentSignalState::Unknown, millis());
+    clearSignalPage();
+    usageCardDirty = true;
   }
 
   updateDisplay();

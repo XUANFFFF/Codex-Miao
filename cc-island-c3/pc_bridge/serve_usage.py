@@ -18,6 +18,8 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlparse
 
+from session_activity import SessionActivityMonitor
+
 
 DEFAULT_CODEX_HOME = Path(os.environ.get("USERPROFILE", "")) / ".codex"
 DEFAULT_AUTH_PATH = Path(os.environ.get("USERPROFILE", "")) / ".codex" / "auth.json"
@@ -301,6 +303,10 @@ USAGE_UI_HTML = """<!doctype html>
           return 'permission · 等待确认';
         case 'blocked':
           return 'blocked · 已阻塞';
+        case 'done':
+          return 'done · 刚刚完成';
+        case 'unknown':
+          return 'unknown · 状态暂不可确认';
         default:
           return signal || '--';
       }
@@ -308,7 +314,8 @@ USAGE_UI_HTML = """<!doctype html>
 
     function applyUsage(data) {
       const offline = data.display_mode === 'face' || data.bridge_state === 'offline';
-      els.agentSignal.textContent = formatAgentSignal(data.agent_signal);
+      els.agentSignal.textContent = formatAgentSignal(data.agent_signal)
+        + ` · 工作 ${data.active_sessions ?? 0} / 待确认 ${data.permission_sessions ?? 0}`;
       if (offline) {
         setStatus('已暂停，ESP 显示表情', 'var(--idle)');
         els.windowPct.textContent = '--';
@@ -343,16 +350,20 @@ USAGE_UI_HTML = """<!doctype html>
       setStatus(data.usage_stale ? '桥接已连接，用量为缓存' : '桥接已连接', 'var(--ok)');
     }
 
+    let latestUsageRequest = 0;
     async function loadUsage() {
+      const requestRevision = ++latestUsageRequest;
       try {
         setError('');
         const res = await fetch('/usage?format=json', { cache: 'no-store' });
         const data = await res.json();
+        if (requestRevision !== latestUsageRequest) return;
         if (!res.ok) {
           throw new Error(data.error || `Request failed: ${res.status}`);
         }
         applyUsage(data);
       } catch (error) {
+        if (requestRevision !== latestUsageRequest) return;
         setStatus('桥接异常', 'var(--danger)');
         setError(error.message || String(error));
       }
@@ -915,16 +926,26 @@ def build_payload_from_usage(payload: dict) -> dict:
     }
 
 
-def build_current_payload(auth_path: Path, mode_path: Path, usage_cache: UsageCache | None = None) -> dict:
-    if read_bridge_mode(mode_path) == "offline":
+def build_current_payload(auth_path: Path, mode_path: Path, usage_cache: UsageCache | None = None,
+                          activity_monitor: SessionActivityMonitor | None = None) -> dict:
+    offline = read_bridge_mode(mode_path) == "offline"
+    activity = activity_monitor.snapshot(paused=offline) if activity_monitor is not None else {
+        "agent_signal": derive_agent_signal_from_codex_sessions(),
+    }
+    if offline:
         return {
+            **activity,
             "display_mode": "face",
             "bridge_state": "offline",
             "agent_signal": "idle",
+            "active_sessions": 0,
+            "permission_sessions": 0,
+            "completed_sessions": 0,
+            "unknown_sessions": 0,
         }
 
     result = {
-        "agent_signal": derive_agent_signal_from_codex_sessions(),
+        **activity,
         "usage_available": False,
         "usage_stale": False,
     }
@@ -1147,7 +1168,7 @@ class BridgeHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
 
-def make_handler(auth_path: Path, mode_path: Path, bridge_token: str):
+def make_handler(auth_path: Path, mode_path: Path, bridge_token: str, activity_monitor=None):
     usage_cache = UsageCache(lambda: fetch_wham_usage(auth_path))
     challenges = ChallengeStore()
 
@@ -1209,6 +1230,8 @@ def make_handler(auth_path: Path, mode_path: Path, bridge_token: str):
                     {
                         "ok": True,
                         "bridge_state": read_bridge_mode(mode_path),
+                        "protocol_version": 2,
+                        "activity": activity_monitor.snapshot(diagnostics=True) if activity_monitor else None,
                     },
                 )
                 return
@@ -1221,7 +1244,7 @@ def make_handler(auth_path: Path, mode_path: Path, bridge_token: str):
                 if self.wants_html(query):
                     self.write_html(USAGE_UI_HTML)
                     return
-                self.write_json(200, build_current_payload(auth_path, mode_path, usage_cache))
+                self.write_json(200, build_current_payload(auth_path, mode_path, usage_cache, activity_monitor))
             except Exception as exc:
                 if self.wants_html(query):
                     self.write_html(USAGE_UI_HTML)
@@ -1270,9 +1293,11 @@ def main() -> None:
         parser.error(str(exc))
     bridge_token = read_bridge_token(args.secrets_path)
 
+    activity_monitor = SessionActivityMonitor(DEFAULT_SESSIONS_PATH, DEFAULT_PERMISSION_STATE_PATH)
     server = BridgeHTTPServer(
-        (args.host, args.port), make_handler(args.auth_path, args.mode_path, bridge_token)
+        (args.host, args.port), make_handler(args.auth_path, args.mode_path, bridge_token, activity_monitor)
     )
+    activity_monitor.start()
     stop_event = threading.Event()
     broadcaster = start_discovery_broadcaster(
         stop_event,
@@ -1297,6 +1322,7 @@ def main() -> None:
         server.shutdown()
         broadcaster.join(timeout=5)
         server.server_close()
+        activity_monitor.close()
 
 
 if __name__ == "__main__":

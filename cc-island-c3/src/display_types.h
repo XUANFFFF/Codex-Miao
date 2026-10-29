@@ -28,6 +28,8 @@ enum class AgentSignalState : uint8_t {
   Working,
   Permission,
   Blocked,
+  Done,
+  Unknown,
 };
 
 enum class SignalPageKind : uint8_t {
